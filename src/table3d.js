@@ -423,7 +423,12 @@ export function createTable(host, opts = {}) {
       cloth.castShadow = hi;
       cloth.userData.base = clothGeo.attributes.position.array.slice();
       g.add(cloth);
-      g.userData = { cloth, drop: performance.now(), dispose: () => { tex.dispose(); clothGeo.dispose(); cloth.material.dispose(); base.geometry.dispose(); base.material.dispose(); } };
+      // 插旗落地時揚起一圈沙
+      const shock = new THREE.Mesh(new THREE.RingGeometry(0.6, 0.95, 24), new THREE.MeshBasicMaterial({ color: 0xe8d5aa, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
+      shock.rotation.x = -Math.PI / 2;
+      shock.position.set(-0.25, 0.06, -0.15);
+      g.add(shock);
+      g.userData = { cloth, shock, drop: performance.now(), dispose: () => { tex.dispose(); clothGeo.dispose(); cloth.material.dispose(); base.geometry.dispose(); base.material.dispose(); shock.geometry.dispose(); shock.material.dispose(); } };
       flags.set(c, g);
       scene.add(g);
     }
@@ -463,6 +468,13 @@ export function createTable(host, opts = {}) {
       const age = (now - g.userData.drop) / 1000;
       const drop = reduced ? 0 : Math.max(0, 1 - age / 0.55);
       g.position.set(p.x + 0.25, h + drop * drop * 6, p.z + 0.15);
+      const sk = g.userData.shock;
+      const land = age - 0.55;
+      if (!reduced && land > 0 && land < 0.9) {
+        const k = 1 + land * 3.2;
+        sk.scale.set(k, k, k);
+        sk.material.opacity = 0.75 * (1 - land / 0.9);
+      } else sk.material.opacity = 0;
       // 旗子飄動
       const cloth = g.userData.cloth;
       const pos = cloth.geometry.attributes.position;
