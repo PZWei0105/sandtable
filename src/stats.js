@@ -40,6 +40,7 @@ export function benchIndex(h, startD, startPx, days, liveToday) {
 
 /**
  * 每個交易日收盤的總資產（今天用即時價）。days：開局那天到今天的交易日。
+ * 每一天只算到那天收盤為止的成交與委託（ledger 依時間切），不會把之後的交易算進以前的淨值。
  * 回傳 { days, nav:[元], ret:[報酬], bench:[同期 0050 報酬], mdd, maxNav }
  */
 export function navSeries(run, mkt, hist, nowMs, days) {

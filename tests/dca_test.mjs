@@ -9,9 +9,15 @@ function test(name, fn) {
   try { fn(); pass++; console.log('ok   ' + name); } catch (e) { fail++; console.log('FAIL ' + name + '\n     ' + (e && e.message || e)); }
 }
 const cal = R.makeCal({ holidays: [20261026, 20270101, 20270216, 20270217] });
-const mk = (closes = {}, extra = {}) => ({
-  cal, close: (c, d) => (closes[d] === undefined ? undefined : closes[d]), splits: () => [], divs: () => [], last: () => 100, cat: () => 'broad', ...extra,
-});
+// asof＝官方收盤資料最新的日期（沒給就用 closes 裡最後一天）；那天以後的收盤價一律「還沒到」
+const mk = (closes = {}, { asof: a, ...extra } = {}) => {
+  const ds = Object.keys(closes).map(Number);
+  const asof = a !== undefined ? a : (ds.length ? Math.max(...ds) : null);
+  return {
+    cal, asof: () => asof, close: (c, d) => (asof == null || d > asof ? undefined : closes[d]),
+    splits: () => [], divs: () => [], last: () => 100, cat: () => 'broad', ...extra,
+  };
+};
 const baseRun = (o = {}) => ({ id: 'r', start: { at: R.atTW(20261001, 900), d: 20261001 }, capital: 100000, fees: { ...R.DEFAULT_FEES }, orders: [], mods: [], fills: [], plans: [], dcaLog: {}, ...o });
 
 test('申請後第 2 個交易日才生效', () => {
@@ -40,10 +46,17 @@ test('用收盤價買零股，股數無條件捨去、手續費 1 元', () => {
   assert.equal(r.newFills[0].fee, 1);
   assert.equal(r.newFills[0].id, 'dca:p:20261006');
 });
-test('收盤前不買、資料還沒到就等', () => {
+test('官方收盤資料還沒出來就不買、就等', () => {
   const p = { id: 'p', c: '0050', days: [6], amt: 3000, start: 20261001, end: null };
-  assert.equal(runDca(baseRun({ plans: [p] }), mk({ 20261006: 108.3 }), R.atTW(20261006, 1300)).newFills.length, 0);
+  assert.equal(runDca(baseRun({ plans: [p] }), mk({ 20261006: 108.3 }, { asof: 20261005 }), R.atTW(20261006, 1500)).newFills.length, 0, '收盤資料停在前一天');
   assert.equal(runDca(baseRun({ plans: [p] }), mk({}), R.atTW(20261006, 1500)).newFills.length, 0);
+});
+test('資料一直沒到也不會因為時間過了就跳過那一期（不看時鐘）', () => {
+  const p = { id: 'p', c: '0050', days: [6, 13], amt: 3000, start: 20261001, end: null };
+  const r = runDca(baseRun({ plans: [p] }), mk({ 20261013: 100 }, { asof: 20261020 }), R.atTW(20261120, 1500));
+  assert.equal(r.log['p:20261006'], undefined, '10/6 的收盤價還沒載入：等，不記成跳過');
+  assert.equal(r.log['p:20261013'], undefined, '照順序一期一期來，前面那期還沒好，後面也等');
+  assert.equal(r.newFills.length, 0);
 });
 test('停止交易那天不扣也不補', () => {
   const p = { id: 'p', c: '0050', days: [6], amt: 3000, start: 20261001, end: null };

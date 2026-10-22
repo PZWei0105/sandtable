@@ -34,7 +34,8 @@ export function daysBetween(a, b) {
 
 // ------------------------------------------------------------------ 交易日曆
 /**
- * cal = { holidays: 平日休市的日期, open: 資料上確定有開市的日期, closed: 資料上確定沒開市的平日（颱風假）}
+ * cal = { holidays: 平日休市的日期, open: 資料上確定有開市的日期, closed: 資料上確定沒開市的平日（颱風假）,
+ *         guess: App 自己從即時資料「猜」今天休市（只拿來顯示，不拿來把委託作廢） }
  * 證交所公布的休市表只有事先排定的假日；颱風假要看當天資料。
  */
 export function makeCal(raw = {}) {
@@ -43,13 +44,20 @@ export function makeCal(raw = {}) {
     settleOnly: new Set(raw.settle_only || []),   // 不交易、但照常辦理交割的日子（例如春節前）
     open: new Set(raw.open || []),
     closed: new Set(raw.closed || []),
+    guess: new Set(raw.guess || []),
   };
 }
 export function isTradingDay(cal, d) {
   if (cal.open.has(d)) return true;
-  if (cal.closed.has(d) || cal.holidays.has(d)) return false;
+  if (cal.closed.has(d) || cal.holidays.has(d) || (cal.guess && cal.guess.has(d))) return false;
   const w = dow(d);
   return w !== 0 && w !== 6;
+}
+/** 確定那天沒開市（證交所休市表、或後台用實際成交紀錄推出來的颱風假）。只有這種才能把委託作廢。 */
+export function closedSure(cal, d) {
+  if (cal.open.has(d)) return false;
+  const w = dow(d);
+  return w === 0 || w === 6 || cal.holidays.has(d) || cal.closed.has(d);
 }
 export function nextTradingDay(cal, d) {
   let x = addDays(d, 1);

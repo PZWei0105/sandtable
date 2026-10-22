@@ -62,6 +62,14 @@ function daytradeOk(r, Lg) {
   return R.daytradeStatus(r.start.d, R.tw(now()).d, fills).ok;
 }
 
+const OTC_AFTER = '上櫃 ETF 的盤後定價、盤後零股，沙盤還沒有官方的成交資料可以判斷，暫時不開放（盤中零股可以下）';
+/** 今天買的為什麼還不能賣 */
+function sellWhy(h, dtOk, sess) {
+  if (!dtOk) return '今天買進的股數要明天才能賣（還沒有當沖資格）';
+  if (sess !== 'reg') return '今天買進的股數不能用零股、盤後定價賣掉（現股當沖只限整股）';
+  return '今天用零股、盤後買進的股數要明天才能賣（零股不能當沖）';
+}
+
 // ------------------------------------------------------------------ 提示
 function toast(html, ms = 4200) {
   const box = document.createElement('div');
@@ -186,31 +194,49 @@ async function poll() {
   } finally { polling = false; }
 }
 
-/** 撮合：把所有還沒結束的委託推進到現在，有新成交就通知 */
+/**
+ * 撮合：把所有還沒結束的委託推進到現在，有新成交就通知。
+ * 一定要拿到過新鮮的伺服器時間、而且不是離線（用快取的舊資料）才做：離線時什麼都不判斷、不存，
+ * 連上網路之後再用真的資料判斷（改手機時鐘、關網路都沒辦法讓委託提早失效或刪單提早生效）。
+ */
 async function settle(quiet = false) {
+  if (!D.serverOk()) return false;
   const r = run();
-  if (!r) return;
+  if (!r) return false;
   const open = r.orders.filter((o) => !(r.finals || {})[o.id]);
-  const codes = [...new Set(open.map((o) => o.code))];
-  const today = R.tw(now()).d;
-  await Promise.all(codes.map((c) => D.ensureTape(c)));
-  // 幾天前的委託（tape 只留兩天）：用 K 線收盤資料保守判斷
-  await Promise.all(open.filter((o) => o.day < today).map((o) => D.ensureK(o.code)));
-  const res = E.processRun(r, mkt(), now());
+  const t0 = now();
+  const today = R.tw(t0).d;
+  const late = R.tw(t0).hm >= 1330;
+  // 每一筆還沒結束的委託「那一天」的逐輪快照（今天、前一個交易日在 tape/，更早的從封存抓）、官方日 K、盤後結果
+  await Promise.all(open.map((o) => D.ensureTapeDay(o.code, o.day)));
+  await Promise.all([...new Set(open.filter((o) => o.day < today || late).map((o) => o.code))].map((c) => D.ensureK(c)));
+  await Promise.all([...new Set(open.filter((o) => o.sess === 'fix' || o.sess === 'oddpm').map((o) => o.day))].map((d) => D.ensureAfterDay(d)));
+  if ((r.plans || []).length) await Promise.all([...new Set(r.plans.map((p) => p.c))].map((c) => Promise.all([D.ensureHist(c), D.ensureK(c)])));
   let changed = false;
-  await ST.withLock(() => { db = ST.update((x) => { changed = ST.mergeEngine(x, r.id, res); return changed ? undefined : false; }); });
-  // 定期定額：每一期在成交日收盤後用官方收盤價買
-  const r2 = run();
-  if (r2 && (r2.plans || []).length) {
-    await Promise.all([...new Set(r2.plans.map((p) => p.c))].map((c) => Promise.all([D.ensureHist(c), D.ensureK(c)])));
-    const dres = DCA.runDca(r2, mkt(), now());
-    let ch2 = false;
-    if (dres.newFills.length || Object.keys(dres.log).length !== Object.keys(r2.dcaLog || {}).length || dres.stopAt) {
-      await ST.withLock(() => { db = ST.update((x) => { ch2 = ST.mergeDca(x, r2.id, dres); return ch2 ? undefined : false; }); });
-    }
-    if (ch2) { changed = true; announceDca(quiet, r2.dcaLog || {}); }
+  let before = null;
+  await ST.withLock(() => {
+    db = ST.update((x) => {
+      // 在鎖裡面、用存檔裡最新的那一份算（另一個分頁可能剛寫過）
+      const rr = ST.curRun(x);
+      if (!rr || rr.id !== r.id || !D.serverOk()) return false;
+      const res = E.processRun(rr, mkt(), now());
+      let ch = ST.mergeEngine(x, rr.id, res);
+      // 定期定額：每一期在成交日收盤資料出來以後，用官方收盤價買
+      if ((rr.plans || []).length) {
+        before = { ...(rr.dcaLog || {}) };
+        const dres = DCA.runDca(rr, mkt(), now());
+        if (ST.mergeDca(x, rr.id, dres)) ch = true;
+      }
+      changed = ch;
+      return ch ? undefined : false;
+    });
+  });
+  if (changed) {
+    if (before) announceDca(quiet, before);
+    announce(quiet);
+    markTable();
   }
-  if (changed) { announce(quiet); markTable(); }
+  return changed;
 }
 
 function announceDca(quiet, before) {
@@ -467,7 +493,8 @@ async function renderQuote() {
     ${h ? `<div class="dossier you"><div class="tab">你的部位</div><div class="kv">
       <div><span>庫存</span><b>${SH(h.sh)}</b></div><div><span>均價</span><b>${P(h.avg)}</b></div><div><span>市值</span><b>${N(h.mv)}</b></div>
       <div><span>${termHTML('未實現損益', '未實現')}</span><b class="${cls(unrealOf(h, r.fees, Lg.today))}">${N(unrealOf(h, r.fees, Lg.today))}</b></div><div><span>報酬</span><b class="${cls(unrealOf(h, r.fees, Lg.today))}">${RET(h.cost ? unrealOf(h, r.fees, Lg.today) / h.cost : null)}</b></div><div><span>可賣</span><b>${SH(E.sellable(Lg, code, daytradeOk(r, Lg)))}</b></div>
-    </div>${h.todayBuy && !daytradeOk(r, Lg) ? `<p class="note">今天買的 ${SH(h.todayBuy)} 要明天才能賣（還沒有${termHTML('當沖')}資格）。</p>` : ''}</div>` : ''}
+    </div>${h.todayBuy && !daytradeOk(r, Lg) ? `<p class="note">今天買的 ${SH(h.todayBuy)} 要明天才能賣（還沒有${termHTML('當沖')}資格）。</p>`
+      : h.todayBuy > (h.todayReg || 0) ? `<p class="note">今天用零股、盤後買的 ${SH(h.todayBuy - (h.todayReg || 0))} 要明天才能賣（零股不能${termHTML('當沖')}）。</p>` : ''}</div>` : ''}
     <div class="tradebar"><button class="btn buy" data-trade="B">買 進</button><button class="btn sell" data-trade="S">賣 出</button></div>`}`;
   const inp = $('#qSearch', el);
   inp.oninput = () => { UI.q = inp.value.trim(); const pos = inp.selectionStart; renderQuote().then(() => { const i2 = $('#qSearch'); i2.focus(); i2.setSelectionRange(pos, pos); }); };
@@ -552,6 +579,7 @@ function renderOrders() {
   el.innerHTML = `
     <div class="dossier"><div class="tab">委託與成交回報</div><div class="act"><div class="seg">
       <button data-view="today" aria-pressed="${UI.orderView === 'today'}">今天</button><button data-view="fills" aria-pressed="${UI.orderView === 'fills'}">成交</button><button data-view="all" aria-pressed="${UI.orderView === 'all'}">全部</button></div></div>
+      ${!D.serverOk() ? '<div class="dossier hazard" style="margin:24px 0 8px"><div class="tab warn">離線</div><p class="note">連不上網路：撮合暫停，什麼都不判斷、不存。連上網路之後，才會用真的行情判斷這段時間的成交。</p></div>' : ''}
       ${openOnes.length ? `<p class="note">掛著 ${openOnes.length} 筆，後台每一輪新行情進來就會自動撮合。</p>` : ''}
       ${list ? (list.map(slip).join('') || `<div class="empty"><span class="brush">桌上沒有紙條</span>${UI.orderView === 'today' ? '今天還沒下單' : '還沒有委託'}</div>`)
         : (fills.map((f) => `<div class="slip"><span class="stamp filled">${f.sess === 'dca' ? '定期定額' : '成交'}</span><div class="h"><span class="side ${f.side}">${E.SIDE_NAME[f.side]}</span><span class="code">${f.code}</span><span class="nm">${esc((D.row(f.code) || {}).n || '')}</span></div>
@@ -861,9 +889,11 @@ function journalHTML(r) {
 }
 
 function archiveHTML(list) {
-  if (!list.length) return '';
-  return `<div class="dossier"><div class="tab">戰役紀錄 <small>封存的每一局都留著</small></div><div class="list">${list.map((x) => `<div class="li"><div class="t">${esc(x.name)}</div><div class="v ${cls(x.end.ret)}">${RET(x.end.ret)}</div>
-    <div class="s">${MD(x.start.d)}～${MD(x.end.d)} ・ 起始 ${N(x.capital)} ・ ${x.end.fills} 筆成交${(x.restores || []).length ? ' ・ 還原過' : ''}</div><div class="w">0050 ${RET(x.end.bench)}</div></div>`).join('')}</div></div>`;
+  const logs = db.restores || [];
+  const restoreNote = logs.length ? `<p class="note">這支手機還原過備份 ${logs.length} 次（最近一次 ${MD(R.tw(logs[logs.length - 1].at).d)}）。</p>` : '';
+  if (!list.length) return restoreNote ? `<div class="dossier"><div class="tab">戰役紀錄</div>${restoreNote}</div>` : '';
+  return `<div class="dossier"><div class="tab">戰役紀錄 <small>封存的每一局都留著</small></div><div class="list">${list.map((x) => `<div class="li"><div class="t">${esc(x.name)}${x.end.parked ? ' <small class="warn">還原時捨棄</small>' : ''}</div><div class="v ${cls(x.end.ret)}">${x.end.parked ? '—' : RET(x.end.ret)}</div>
+    <div class="s">${MD(x.start.d)}～${x.end.d ? MD(x.end.d) : ''} ・ 起始 ${N(x.capital)} ・ ${x.end.parked ? `${(x.fills || []).length} 筆成交` : `${x.end.fills} 筆成交`}${(x.restores || []).length ? ' ・ 還原過' : ''}</div><div class="w">${x.end.parked ? '' : `0050 ${RET(x.end.bench)}`}</div></div>`).join('')}</div>${restoreNote}</div>`;
 }
 
 function settingsBlock() {
@@ -935,16 +965,17 @@ async function exportDialog() {
   });
 }
 function importDialog() {
-  modal(`<h2>還原備份</h2><div class="dossier hazard" style="margin-top:26px"><div class="tab warn">注意</div><p class="note">還原會把這支手機上的沙盤資料換成備份裡的內容。還原等於「回到過去」，所以每一局都會留下還原紀錄，戰報上會一直看得到。</p></div>
+  modal(`<h2>還原備份</h2><div class="dossier hazard" style="margin-top:26px"><div class="tab warn">注意</div><p class="note">還原是把備份「合併」進這支手機：手機上已經有的委託、成交一筆都不會少（同一局取兩邊的聯集），手機上沒有的局整局加進來。進行中的局只能有一個：手機上本來進行中的那一局優先，備份帶進來的其他進行中的局會封存起來。每次還原都會留下紀錄，戰報上一直看得到。</p></div>
     <textarea id="impT" class="field" style="width:100%;height:110px;font-size:11px" placeholder="貼上備份碼"></textarea>
     <div class="row" style="justify-content:flex-end"><button class="btn ghost" data-close>取消</button><button class="btn danger" id="impOk">還原</button></div>`, {
     onMount: (m, close) => {
       $('#impOk', m).onclick = async () => {
+        if (!D.hasServerTime()) { note('連不上網路：還原要記下伺服器時間，請連上網路再試'); return; }
         try {
-          await ST.importBackup($('#impT', m).value, now());
+          const { log } = await ST.importBackup($('#impT', m).value, now());
           close();
-          note('已還原');
-          location.reload();
+          note(`已還原：加進 ${log.added.length} 局、合併 ${log.merged.length} 局${log.parked.length ? `、封存 ${log.parked.length} 局` : ''}`);
+          setTimeout(() => location.reload(), 900);
         } catch (e) { $('#impT', m).style.borderColor = 'var(--up)'; note(esc(e.message || '還原失敗')); }
       };
     },
@@ -1034,8 +1065,9 @@ function openTicket(code, side) {
   // 賣出時預設數量＝可賣
   if (side === 'S') {
     const Lg = L(r);
-    const can = E.sellable(Lg, code, daytradeOk(r, Lg));
-    if (can > 0 && can < 1000) { st.kind = 'odd'; st.qty = can; } else if (can >= 1000) st.qty = 1000;
+    const can = E.sellable(Lg, code, daytradeOk(r, Lg), 'reg');
+    const canOdd = E.sellable(Lg, code, daytradeOk(r, Lg), 'odd');
+    if (can < 1000 && canOdd > 0) { st.kind = 'odd'; st.qty = Math.min(999, canOdd); } else if (can >= 1000) st.qty = 1000;
   }
   const host = $('#sheetHost');
   host.innerHTML = '<div class="sheet-bg"></div><div class="sheet" role="dialog" aria-modal="true" aria-label="下單"></div>';
@@ -1065,7 +1097,9 @@ function openTicket(code, side) {
     if (!w.types.includes(st.type === 'C' ? 'C' : st.type)) {
       if (w.sess === 'fix') st.type = 'C'; else st.type = 'L';
     }
+    if (st.type === 'M' && !D.hasLimits(code)) st.type = 'L';
     if (!w.tifs.includes(st.tif)) st.tif = 'ROD';
+    if ((w.sess === 'fix' || w.sess === 'oddpm') && row0.m === 'otc') errs.push(OTC_AFTER);
     if (w.sess === 'fix') {
       st.type = 'C';
       const close = c.q && c.q.d === c.today ? c.q.z : null;
@@ -1092,13 +1126,12 @@ function openTicket(code, side) {
     if (st.side === 'B') {
       if (amt + fee > Lg.avail) errs.push(`可用額度不足：需要 ${N(amt + fee)}，可用 ${N(Lg.avail)}`);
     } else {
-      const can = E.sellable(Lg, code, dtOk);
+      const can = E.sellable(Lg, code, dtOk, w.sess);
       const h = Lg.holdings.find((x) => x.code === code);
       if (st.qty > can) {
-        if (h && h.todayBuy && !dtOk && st.qty <= h.sh - h.locked) errs.push('今天買進的股數要明天才能賣（還沒有當沖資格）');
+        if (h && h.todayBuy && st.qty <= h.sh - h.locked) errs.push(sellWhy(h, dtOk, w.sess));
         else errs.push(`可賣 ${SH(can)}`);
       }
-      if (odd && h && w.day === c.today && st.qty <= can && h.todayBuy && !dtOk) { /* 已在上面處理 */ }
     }
     return { errs, c, Lg, amt, fee, fin, tax, total, refPx, odd, dtOk };
   }
@@ -1126,7 +1159,7 @@ function openTicket(code, side) {
       <div class="num ${cls(ch.ch)}" style="font-size:15px">${P(ch.px)} ${PCT(ch.pct)}${b1 || a1 ? ` <span class="dim">買一 ${P(b1)}／賣一 ${P(a1)}</span>` : ''}</div>
       <div class="ticket-side"><button class="B" data-side="B" aria-pressed="${st.side === 'B'}">買 進</button><button class="S" data-side="S" aria-pressed="${st.side === 'S'}">賣 出</button></div>
       <div class="row sp"><div class="seg"><button data-kind="lot" aria-pressed="${st.kind === 'lot'}">整股</button><button data-kind="odd" aria-pressed="${st.kind === 'odd'}">零股</button></div>
-        <div class="seg">${['L', 'M'].map((t) => `<button data-type="${t}" aria-pressed="${st.type === t}" ${w && !w.blocked && w.types.includes(t) ? '' : 'disabled'}>${E.TYPE_NAME[t]}</button>`).join('')}</div>
+        <div class="seg">${['L', 'M'].map((t) => `<button data-type="${t}" aria-pressed="${st.type === t}" ${w && !w.blocked && w.types.includes(t) && (t !== 'M' || D.hasLimits(code)) ? '' : 'disabled'}>${E.TYPE_NAME[t]}</button>`).join('')}</div>
         <div class="seg">${['ROD', 'IOC', 'FOK'].map((t) => `<button data-tif="${t}" aria-pressed="${st.tif === t}" ${w && !w.blocked && w.tifs.includes(t) ? '' : 'disabled'}>${t}</button>`).join('')}</div></div>
       <div id="tSess">${sessHTML(w)}</div>
       <div class="field"><label>價格 ${st.type === 'M' ? '（市價：有人賣就買）' : st.type === 'C' ? '（盤後定價：今天收盤價）' : ''}</label>
@@ -1144,7 +1177,7 @@ function openTicket(code, side) {
       </div>
       <div id="tErr">${errHTML(k)}</div>
       <button class="hold ${st.side}" id="hold" ${k.errs.length ? 'disabled' : ''}><span class="fillbar"></span><span class="lab">${st.side === 'B' ? '長按送出買單' : '長按送出賣單'}</span></button>
-      <p class="note" style="text-align:center">送出時會先連網取得伺服器時間；盤中委託在下一筆行情（約 5 分鐘內）到達交易所撮合。<br>看不懂？${termHTML('ROD')}、${termHTML('IOC')}、${termHTML('FOK')}、${termHTML('五檔')}</p>`;
+      <p class="note" style="text-align:center">送出時會先連網取得伺服器時間；盤中委託在下一筆行情（約 5 分鐘內）到達交易所撮合。${D.hasLimits(code) ? '' : '<br>這檔沒有漲跌幅限制（國外成分），證交所不接受市價單。'}<br>看不懂？${termHTML('ROD')}、${termHTML('IOC')}、${termHTML('FOK')}、${termHTML('五檔')}</p>`;
     bind();
   }
   function sessHTML(w) {
@@ -1161,7 +1194,7 @@ function openTicket(code, side) {
       <div><span>手續費${fee !== k.fin ? `（隔天退 ${N(fee - k.fin)}）` : ''}</span><b>${N(fee)}</b></div>
       ${st.side === 'S' ? `<div><span>證交稅</span><b>${N(k.tax)}</b></div>` : ''}
       <div class="tot"><span>${st.side === 'B' ? '交割要付' : '交割可收'}${settleD ? `（${MD(settleD)} ${WD(settleD)}）` : ''}</span><b>${N(k.total)}</b></div>
-      <div><span>${st.side === 'B' ? '可用額度' : '可賣'}</span><b class="you">${st.side === 'B' ? N(k.Lg.avail) : SH(E.sellable(k.Lg, code, k.dtOk))}</b></div>
+      <div><span>${st.side === 'B' ? '可用額度' : '可賣'}</span><b class="you">${st.side === 'B' ? N(k.Lg.avail) : SH(E.sellable(k.Lg, code, k.dtOk, k.c.win && !k.c.win.blocked ? k.c.win.sess : 'reg'))}</b></div>
     </div>`;
   }
   function errHTML(k) {
@@ -1185,7 +1218,7 @@ function openTicket(code, side) {
         const k = check();
         const u = st.kind === 'lot' ? 1000 : 1;
         if (st.side === 'S') {
-          const can = E.sellable(k.Lg, code, k.dtOk);
+          const can = E.sellable(k.Lg, code, k.dtOk, k.c.win && !k.c.win.blocked ? k.c.win.sess : 'reg');
           st.qty = st.kind === 'lot' ? Math.max(1000, Math.floor(can / 1000) * 1000) : Math.max(1, Math.min(999, can % 1000 || can));
         } else {
           const px = k.refPx || lastPx;
@@ -1254,52 +1287,68 @@ async function placeOrder(st, opt) {
   await settle(true);
   const r = run();
   if (!r) return false;
-  const Lg = L(r);
+  const reject = (msg) => { note(esc(msg)); fx('reject'); return false; };
   const w = R.orderWindow(D.S.cal, at, st.kind);
-  if (!w || w.blocked) { note(esc(w ? w.why : '現在不能下單')); fx('reject'); return false; }
+  if (!w || w.blocked) return reject(w ? w.why : '現在不能下單');
   const today = R.tw(at).d;
   const lim = R.limitsOf(q);
+  const row0 = D.row(st.code) || {};
   let type = st.type;
-  let tif = st.tif;
+  const tif = st.tif;
   if (w.sess === 'fix') type = 'C';
-  else if (!w.types.includes(type)) { note(`現在（${R.PHASE_NAME[w.phase]}）只能下限價 ROD`); fx('reject'); return false; }
-  if (!w.tifs.includes(tif)) tif = 'ROD';
+  else if (!w.types.includes(type)) return reject(`現在（${R.PHASE_NAME[w.phase]}）只能下限價 ROD`);
+  // 送出那一刻的時段不接受這種委託條件：照實退回，不會偷偷改成 ROD
+  if (!w.tifs.includes(tif)) return reject(`現在（${R.PHASE_NAME[w.phase]}）只接受 ${w.tifs.join('／')}，你的 ${tif} 沒有送出`);
+  if (type === 'M' && !D.hasLimits(st.code)) return reject('這檔沒有漲跌幅限制（國外成分 ETF），證交所不接受市價單');
+  if ((w.sess === 'fix' || w.sess === 'oddpm') && row0.m === 'otc') return reject(OTC_AFTER);
   let px = type === 'M' ? null : st.px;
   if (type === 'C') {
     px = q && q.d === today ? q.z : null;
-    if (!isNum(px)) { note('今天的收盤價還沒確定，不能下盤後定價'); fx('reject'); return false; }
+    if (!isNum(px)) return reject('今天的收盤價還沒確定，不能下盤後定價');
   }
-  if (!R.qtyOk(w.sess, st.qty)) { note('數量不對'); fx('reject'); return false; }
+  if (!R.qtyOk(w.sess, st.qty)) return reject('數量不對');
+  if ((w.sess === 'reg' || w.sess === 'fix') && st.qty > 499000) return reject('整股一筆最多 499 張');
   if (type === 'L') {
-    if (!R.onTick(px)) { note('價格不符合升降單位'); fx('reject'); return false; }
-    if (w.day === today && q && q.d === today && ((lim.up && px > lim.up + 1e-9) || (lim.down && px < lim.down - 1e-9))) { note('超出今天的漲跌停'); fx('reject'); return false; }
+    if (!R.onTick(px)) return reject('價格不符合升降單位');
+    if (w.day === today && q && q.d === today && ((lim.up && px > lim.up + 1e-9) || (lim.down && px < lim.down - 1e-9))) return reject('超出今天的漲跌停');
   }
-  const odd = w.sess === 'odd' || w.sess === 'oddpm';
   const resPx = type === 'M' ? (st.side === 'B' ? (lim.up || R.snapTick((q && q.z ? q.z : D.lastPx(st.code)) * 1.2, 1)) : null) : null;
   const order = {
     id: ST.newId('o', at), at, code: st.code, side: st.side, sess: w.sess, type, tif, px, qty: st.qty, day: w.day, phase: w.phase,
     resPx, ref: refOf(st.code, q),
     prev: st.prev || null,
   };
-  if (st.side === 'B') {
-    const need = E.reserveOf(order, st.qty, r.fees);
-    if (need > Lg.avail) { note(`可用額度不足：需要 ${N(need)}，可用 ${N(Lg.avail)}`); fx('reject'); return false; }
-  } else {
-    const can = E.sellable(Lg, st.code, daytradeOk(r, Lg));
-    if (st.qty > can) { note(`可賣只有 ${SH(can)}`); fx('reject'); return false; }
-  }
   // 槓桿／反向 ETF：第一次買要先看風險預告書（真實世界要簽）
-  const cat = (D.row(st.code) || {}).k;
+  const cat = row0.k;
   if (st.side === 'B' && (cat === 'lev' || cat === 'inv') && !(r.signed || {}).lev) {
     const ok = await confirmBox('槓桿／反向 ETF 風險預告書', `<ul><li>槓桿、反向 ETF 追蹤的是「每天」的倍數報酬，持有超過一天，報酬不會剛好是指數的幾倍，盤整時會一直耗損。</li><li>適合短線操作，不適合長期存股。</li><li>真實世界第一次買要符合適格性條件並簽署風險預告書。</li></ul>`, '我了解，簽署');
     if (!ok) return false;
-    db = ST.update((x) => { x.runs[r.id].signed = { ...(x.runs[r.id].signed || {}), lev: at }; });
+    db = ST.update((x) => { if (x.runs[r.id]) x.runs[r.id].signed = { ...(x.runs[r.id].signed || {}), lev: at }; });
   }
-  db = ST.update((x) => {
-    const rr = x.runs[r.id];
-    rr.orders.push(order);
-    if (st.note || (st.tags && st.tags.length)) rr.notes[order.id] = { t: st.note || '', tags: st.tags || [] };
+  // 最後一關：在鎖裡面用存檔裡最新的帳戶再檢查一次額度、可賣股數（另一個分頁可能剛下過單）
+  let err = null;
+  await ST.withLock(() => {
+    db = ST.update((x) => {
+      const rr = ST.curRun(x);
+      if (!rr || rr.id !== r.id) { err = '這一局已經結束'; return false; }
+      const Lg = E.ledger(rr, mkt(), now());
+      if (st.side === 'B') {
+        const need = E.reserveOf(order, st.qty, rr.fees);
+        if (need > Lg.avail) { err = `可用額度不足：需要 ${N(need)}，可用 ${N(Lg.avail)}`; return false; }
+      } else {
+        const can = E.sellable(Lg, st.code, daytradeOk(rr, Lg), w.sess);
+        if (st.qty > can) {
+          const h = Lg.holdings.find((y) => y.code === st.code);
+          err = h && h.todayBuy && st.qty <= h.sh - h.locked ? sellWhy(h, daytradeOk(rr, Lg), w.sess) : `可賣只有 ${SH(can)}`;
+          return false;
+        }
+      }
+      rr.orders.push(order);
+      if (st.note || (st.tags && st.tags.length)) rr.notes[order.id] = { t: st.note || '', tags: st.tags || [] };
+      return undefined;
+    });
   });
+  if (err) return reject(err);
   fx('send');
   toast(`<div class="slip"><span class="stamp ${w.phase === 'reserve' ? 'queued' : 'wait'} new">${w.phase === 'reserve' ? '預約' : '已送出'}</span><div class="h"><span class="side ${order.side}">${E.SIDE_NAME[order.side]}</span><span class="code">${order.code}</span></div><div class="d">${orderLine(order)}</div><div class="m">伺服器時間 ${HMS(at)} ${w.phase === 'continuous' ? '・ 下一筆行情到達交易所' : `・ ${esc(w.note)}`}</div></div>`, 4600);
   await settle();

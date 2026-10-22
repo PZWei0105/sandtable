@@ -49,17 +49,20 @@ export function feeFor(plan, d) {
 }
 
 /**
- * 把定期定額推進到現在：每一期在成交日收盤後，用官方收盤價買零股（股數＝(金額－手續費)÷收盤價，無條件捨去）。
+ * 把定期定額推進到「官方收盤資料已經出來」的那一天：每一期在成交日收盤後，用官方收盤價買零股
+ * （股數＝(金額－手續費)÷收盤價，無條件捨去）。
  * 回傳 { newFills, log: {期別 key: {st, d, why}}, stopAt: 連續失敗 3 次時的停扣日 }。
- * mkt.close(code, d) 要回傳那天的官方收盤價（沒有成交回傳 null；資料還沒到回傳 undefined）。
+ * 一律看資料、不看時鐘：mkt.asof() 是官方收盤資料最新的日期；mkt.close(code, d) 回傳那天的官方收盤價
+ * （確定沒有成交回傳 null；資料還沒到回傳 undefined）。照日期順序一期一期處理，前面那期還不知道就先等。
  */
 export function runDca(run, mkt, nowMs) {
-  const { d: today, hm } = tw(nowMs);
   const plans = run.plans || [];
   const log = { ...(run.dcaLog || {}) };
   const newFills = [];
   if (!plans.length) return { newFills, log, stopAt: null };
-  const lastDone = hm >= 1430 ? today : addDays(today, -1);   // 今天收盤價 14:30 以後才算確定
+  const asof = mkt.asof ? mkt.asof() : null;
+  if (!asof) return { newFills, log, stopAt: null };
+  const lastDone = Math.min(asof, tw(nowMs).d);
   // 依時間順序處理所有計畫的每一期（扣款要看當時的可用額度）
   const periods = [];
   for (const p of plans) {
@@ -77,11 +80,7 @@ export function runDca(run, mkt, nowMs) {
     if (log[per.key]) continue;
     if (stopAt) break;
     const px = mkt.close(per.p.c, per.d);
-    if (px === undefined) {
-      // 資料還沒到：最多等 10 天，之後當成沒辦法扣
-      if (per.d < addDays(today, -10)) log[per.key] = { st: 'skip', d: per.d, why: '沒有那天的收盤資料' };
-      continue;
-    }
+    if (px === undefined) break;     // 那天的官方收盤資料還沒到：等（後面的期數也等，順序不能亂）
     if (px === null || !(px > 0)) { log[per.key] = { st: 'halt', d: per.d, why: '那天沒有成交（停止交易），這期不扣也不補' }; continue; }
     const fee = feeFor(per.p, per.d);
     const qty = Math.floor((per.p.amt - fee) / px);
@@ -89,14 +88,14 @@ export function runDca(run, mkt, nowMs) {
     else {
       // 用「那個時間點」的帳戶算可用額度：之後才有的成交、之後才下的委託都不算
       const T = atTW(per.d, 1430);
-      const L = ledger({ ...run, fills: fills.filter((f) => f.t <= T), orders: (run.orders || []).filter((o) => o.at <= T) }, mkt, T);
+      const L = ledger({ ...run, fills }, mkt, T);
       if (L.avail < per.p.amt) {
         log[per.key] = { st: 'fail', d: per.d, why: `扣款失敗：可用額度 ${Math.floor(L.avail).toLocaleString()} 不夠 ${per.p.amt.toLocaleString()}（不補扣）` };
         fails++;
       } else {
         const amt = amountOf(qty, px);
         const f = {
-          id: `dca:${per.key}`, oid: `dca:${per.p.id}`, t: atTW(per.d, 1430), d: per.d, code: per.p.c, side: 'B', sess: 'dca',
+          id: `dca:${per.key}`, oid: `dca:${per.p.id}`, t: T, d: per.d, code: per.p.c, side: 'B', sess: 'dca',
           qty, px, amt, fee, fin: fee, tax: 0, how: 'dca', s: per.s,
         };
         newFills.push(f);
