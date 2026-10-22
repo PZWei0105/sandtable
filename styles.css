@@ -313,6 +313,14 @@ svg.spk circle { stroke: none; }
 .mv span { position: relative; font: 700 14px var(--f-num); font-variant-numeric: tabular-nums; }
 .mv small { position: relative; display: block; font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 92px; }
 
+/* 更新紀錄 */
+.upd { padding: 10px 0 6px; border-bottom: 1px solid var(--edge); }
+.upd:last-child { border-bottom: 0; }
+.upd .h { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.upd .h b { color: var(--gold-hi); font-size: 15px; }
+.upd ul { margin: 6px 0 0; padding-left: 1.2em; }
+.upd li { margin: 3px 0; color: var(--text-2); font-size: 14px; }
+
 /* 今日戰報 */
 .dayrep .dr-hero { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 2px 0 10px; }
 .dayrep .dr-hero > div { background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(91, 140, 255, 0.18); border-radius: 12px; padding: 10px 12px; min-width: 0; }

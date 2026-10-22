@@ -9,6 +9,7 @@ import { drawIntraday, drawK, drawNav } from './charts.js';
 import { fx, unlock, setSound, setHaptics, play } from './fx.js';
 import { rulesHTML, TERMS } from './guide.js';
 import * as DCA from './dca.js';
+import { UPDATES } from './updates.js';
 
 // ------------------------------------------------------------------ 小工具
 const $ = (s, el = document) => el.querySelector(s);
@@ -34,6 +35,8 @@ const MD = (d) => `${Math.floor(d / 100) % 100}/${d % 100}`;
 const WD = (d) => '日一二三四五六'[R.dow(d)];
 const now = () => D.serverNow();
 
+// 打開之前手機上就有沙盤的存檔＝老玩家（更新紀錄要提示他）；全新的人不跳
+const HAD_SAVE = (() => { try { return localStorage.getItem('sandtable.v1') != null; } catch { return false; } })();
 let db = ST.load();
 const UI = {
   tab: 'table', sel: '0050', chart: 'intra', book: 'reg', q: '', seen: new Set(), seenFinal: new Set(),
@@ -68,6 +71,25 @@ function sellWhy(h, dtOk, sess) {
   if (!dtOk) return '今天買進的股數要明天才能賣（還沒有當沖資格）';
   if (sess !== 'reg') return '今天買進的股數不能用零股、盤後定價賣掉（現股當沖只限整股）';
   return '今天用零股、盤後買進的股數要明天才能賣（零股不能當沖）';
+}
+
+// ------------------------------------------------------------------ 更新紀錄：有沒看過的新功能就提示一次
+function updatesHTML(list) {
+  return list.map((u) => `<div class="upd"><div class="h"><b>${esc(u.title)}</b><span class="num dim">${Math.floor(u.d / 10000)}/${MD(u.d)}</span></div><ul>${u.items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`).join('');
+}
+function showUpdates() {
+  modal(`<h2>更新紀錄</h2><div class="prose">${updatesHTML(UPDATES.slice(0, 12))}</div><div class="row" style="justify-content:flex-end"><button class="btn brass" data-close>知道了</button></div>`, { wide: true });
+}
+function announceUpdates() {
+  if (!UPDATES.length || $('#modalHost').children.length) return;
+  let seen = null;
+  try { seen = localStorage.getItem('sandtable.seenUpd'); } catch { /* 沒關係 */ }
+  const latest = UPDATES[0].id;
+  try { localStorage.setItem('sandtable.seenUpd', latest); } catch { /* 沒關係 */ }
+  if (seen === latest || (!seen && !HAD_SAVE)) return;      // 全新的人不跳；老玩家第一次看到更新紀錄、或之後有新的才跳
+  const fresh = UPDATES.slice(0, Math.max(1, seen ? UPDATES.findIndex((u) => u.id === seen) : 2));
+  modal(`<h2>沙盤更新了</h2><div class="prose">${updatesHTML(fresh.slice(0, 3))}</div><div class="row" style="justify-content:flex-end"><button class="btn brass" data-close>開始用</button></div>`, { wide: true });
+  play('stamp');
 }
 
 // ------------------------------------------------------------------ 提示
@@ -168,6 +190,7 @@ async function main() {
   setTab(UI.tab);
   renderAll();
   UI.ready = true;
+  setTimeout(announceUpdates, 1600);
   if (!run()) openSetup();
   setInterval(tick, 1000);
   setInterval(() => { if (!document.hidden) poll(); }, 30000);
@@ -1189,6 +1212,7 @@ function settingsBlock() {
     <div class="setting"><div class="l"><b>3D 畫質</b><small>手機很燙就調低</small></div><select data-set="quality" class="field" style="margin:0"><option value="auto" ${s.quality === 'auto' ? 'selected' : ''}>自動</option><option value="high" ${s.quality === 'high' ? 'selected' : ''}>高</option><option value="low" ${s.quality === 'low' ? 'selected' : ''}>低</option></select></div>
     <div class="setting"><div class="l"><b>手續費條件</b><small>${Math.round(f.disc * 1000) / 100} 折・整股最低 ${f.min} 元・零股最低 ${f.minOdd} 元・${f.rebate === 'instant' ? '直接折扣' : '日退'}（新開的一局照這個算）</small></div><button class="btn sm" id="feeBtn">修改</button></div>
     <div class="setting"><div class="l"><b>規則說明</b><small>沙盤怎麼判斷成交、哪些地方做不到</small></div><button class="btn sm" id="rulesBtn">打開</button></div>
+    <div class="setting"><div class="l"><b>更新紀錄</b><small>最近一次：${UPDATES.length ? `${MD(UPDATES[0].d)} ${esc(UPDATES[0].title)}` : '—'}</small></div><button class="btn sm" id="updBtn">打開</button></div>
     <div class="setting"><div class="l"><b>備份</b><small>只存在這支手機；清除瀏覽器資料會不見，記得定期匯出</small></div><div class="row"><button class="btn sm" id="expBtn">匯出</button><button class="btn sm" id="impBtn">還原</button></div></div>
     <div class="setting"><div class="l"><b>封存這一局、開新的一局</b><small>舊的一局會永遠留在戰役紀錄，不能刪</small></div><button class="btn sm danger" id="endBtn">封存</button></div>
   </div>`;
@@ -1204,6 +1228,7 @@ function bindSettings(el) {
     };
   });
   const on = (id, fn) => { const b = $(`#${id}`, el); if (b) b.onclick = fn; };
+  on('updBtn', () => showUpdates());
   on('rulesBtn', () => modal(`<h2>沙盤的規則</h2><div class="prose">${rulesHTML((run() || db.settings).fees || db.settings.fees)}</div><div class="row" style="justify-content:flex-end"><button class="btn brass" data-close>知道了</button></div>`, { wide: true }));
   on('feeBtn', feeDialog);
   on('expBtn', exportDialog);
