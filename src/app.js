@@ -124,7 +124,13 @@ function setTab(t) {
   if (t !== 'table') window.scrollTo({ top: 0 });
   play('tap');
 }
-$('#dock').addEventListener('click', (e) => { const b = e.target.closest('button[data-tab]'); if (b) setTab(b.dataset.tab); });
+$('#dock').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-tab]');
+  if (!b) return;
+  // 已經在看盤的單檔頁，再按一次「看盤」回到全部清單
+  if (b.dataset.tab === 'quote' && UI.tab === 'quote' && UI.qmode === 'detail') UI.qmode = 'list';
+  setTab(b.dataset.tab);
+});
 $('#deskNav').addEventListener('click', (e) => {
   if (!e.target.closest('[data-desk="report"]')) return;
   document.body.classList.toggle('wide-report');
