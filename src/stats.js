@@ -5,7 +5,7 @@ import { ledger } from './engine.js';
 
 export const BENCH = '0050';
 
-function closeOn(h, d) {
+export function closeOn(h, d) {
   if (!h || !h.d || !h.d.length) return null;
   let lo = 0;
   let hi = h.d.length - 1;
@@ -92,5 +92,53 @@ export function report(run, L, series) {
     fees: L.feesPaid, taxes: L.taxesPaid, divs, realized, unreal,
     turnover: avgEq > 0 ? L.buyAmt / avgEq : 0,
     exposure: L.equity > 0 ? L.mv / L.equity : 0,
+  };
+}
+
+/**
+ * 一天的戰報（今日戰報卡）：prevDay 收盤 → day 收盤（day 是今天就用即時價、算到 nowMs）。
+ * 每一檔的貢獻＝今天的市值－昨天的市值－買進花的錢＋賣出拿回的錢＋除息的配息，全部加起來就是總資產的變化
+ * （手續費用最後實收的、日退的退款在成交當下就算進總資產，和 ledger 一致）；對不上的部分放在 other（例如入金出金）。
+ * 和 0050 比：同一天 0050 含息的漲跌（開局當天從開局那一刻的價格算）。
+ */
+export function dayReport(run, mkt, hist, nowMs, prevDay, day) {
+  const today = tw(nowMs).d;
+  const live = day === today;
+  const priceOn = (d, isLive) => (c) => (isLive ? mkt.last(c) : closeOn(hist(c), d) ?? mkt.last(c));
+  const t1 = live ? nowMs : atTW(day, 2359);
+  const L0 = ledger(run, { ...mkt, last: priceOn(prevDay, false) }, atTW(prevDay, 2359));
+  const L1 = ledger(run, { ...mkt, last: priceOn(day, live) }, t1);
+  const rows = new Map();
+  const row = (c) => {
+    if (!rows.has(c)) rows.set(c, { code: c, sh0: 0, px0: null, sh1: 0, px1: null, buy: 0, sell: 0, div: 0, pnl: 0 });
+    return rows.get(c);
+  };
+  for (const h of L0.holdings) if (h.sh > 0) Object.assign(row(h.code), { sh0: h.sh, px0: h.px });
+  for (const h of L1.holdings) if (h.sh > 0) Object.assign(row(h.code), { sh1: h.sh, px1: h.px });
+  let fills = 0; let buyAmt = 0; let sellAmt = 0; let fees = 0; let taxes = 0;
+  for (const f of run.fills || []) {
+    if (f.d !== day || f.t > t1) continue;
+    const x = row(f.code);
+    const fee = f.fin ?? f.fee ?? 0;
+    fills++;
+    fees += fee;
+    taxes += f.tax || 0;
+    if (f.side === 'B') { x.buy += f.amt + fee; buyAmt += f.amt; } else { x.sell += f.amt - fee - (f.tax || 0); sellAmt += f.amt; }
+  }
+  for (const it of L1.divItems) if (it.ex === day) row(it.code).div += it.net;
+  let sum = 0;
+  for (const x of rows.values()) {
+    x.pnl = x.sh1 * (x.px1 || 0) - x.sh0 * (x.px0 || 0) - x.buy + x.sell + x.div;
+    sum += x.pnl;
+  }
+  const eq0 = L0.equity;
+  const eq1 = L1.equity;
+  const started = prevDay < run.start.d;      // 這一天才開局：從開局那一刻算
+  const bi = benchIndex(hist(BENCH), started ? run.start.d : prevDay, started ? run.start.bench || null : null, [day], { d: today, px: mkt.last(BENCH) });
+  return {
+    day, prevDay, live, started, eq0, eq1, pnl: eq1 - eq0, ret: eq0 > 0 ? eq1 / eq0 - 1 : null,
+    bench: bi.length ? bi[0] - 1 : null,
+    rows: [...rows.values()].filter((x) => Math.abs(x.pnl) >= 0.5 || x.sh1 > 0).sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl)),
+    other: eq1 - eq0 - sum, fills, buyAmt, sellAmt, fees, taxes,
   };
 }

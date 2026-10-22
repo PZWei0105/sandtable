@@ -43,12 +43,50 @@ function crosshair(cv, onMove) {
   cv.onpointerup = (e) => { if (e.pointerType !== 'mouse') setTimeout(() => onMove(null), 1600); };
 }
 
+// ------------------------------------------------------------------ 你的委託與成交（寶藍）
+const SIDE = { B: '買', S: '賣' };
+/** 掛著的委託：水平虛線＋右邊的小標籤；超出畫面的畫在上緣／下緣並加箭頭 */
+function drawOrderLines(g, orders, { padL, pw, padT, ph, Y, lo, hi, left = false }) {
+  const used = [];
+  for (const o of orders) {
+    if (!(o.px > 0)) continue;
+    const inside = o.px >= lo && o.px <= hi;
+    let y = inside ? Y(o.px) : o.px > hi ? padT + 7 : padT + ph - 7;
+    while (used.some((u) => Math.abs(u - y) < 15)) y += o.px > hi ? 15 : -15;
+    used.push(y);
+    if (inside) {
+      g.setLineDash([6, 4]); g.strokeStyle = 'rgba(91,140,255,0.85)'; g.lineWidth = 1.2;
+      g.beginPath(); g.moveTo(padL, y); g.lineTo(padL + pw, y); g.stroke(); g.setLineDash([]);
+    }
+    const txt = `${inside ? '' : o.px > hi ? '↑ ' : '↓ '}${SIDE[o.side] || ''} ${fmt(o.px)}${o.lbl ? ` ${o.lbl}` : ''}`;
+    g.font = '700 11px "Barlow Condensed", "Noto Sans TC", sans-serif';
+    const tw = g.measureText(txt).width + 10;
+    const x = left ? padL + 2 : padL + pw - tw - 2;
+    g.fillStyle = 'rgba(12,18,40,0.92)'; g.strokeStyle = 'rgba(91,140,255,0.9)'; g.lineWidth = 1;
+    g.beginPath(); g.roundRect ? g.roundRect(x, y - 8, tw, 16, 5) : g.rect(x, y - 8, tw, 16); g.fill(); g.stroke();
+    g.fillStyle = '#a8c1ff'; g.textAlign = 'left'; g.textBaseline = 'middle';
+    g.fillText(txt, x + 5, y + 0.5);
+  }
+  g.font = NUM;
+}
+/** 成交點：寶藍圓點，買在下面標「買」、賣在上面標「賣」 */
+function drawFillDot(g, x, y, side) {
+  g.beginPath(); g.arc(x, y, 5, 0, Math.PI * 2);
+  g.fillStyle = '#5b8cff'; g.fill();
+  g.lineWidth = 1.6; g.strokeStyle = '#eaf0ff'; g.stroke();
+  g.font = '700 10px "Noto Sans TC", sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = '#a8c1ff';
+  g.fillText(SIDE[side] || '', x, side === 'S' ? y - 12 : y + 13);
+  g.font = NUM;
+}
+
 // ------------------------------------------------------------------ 分時
 /**
  * ticks：[{t(ms), z, v(累計股)}]；ref 昨收；up/down 漲跌停；d 日期；live 目前價（最後補一點）
  */
-export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs }, tipEl) {
+export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs, marks }, tipEl) {
   const pts = ticks.filter((x) => x.z > 0);
+  const mk = marks || { orders: [], fills: [] };
   const t0 = atTW(d, 900);
   const t1 = atTW(d, 1330);
   let hover = null;
@@ -59,6 +97,9 @@ export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs }, tipEl)
     const pw = w - padL - padR;
     const prices = pts.map((x) => x.z);
     if (ref) prices.push(ref);
+    // 你的成交一定在畫面裡；委託價離昨收 3% 以內的也放進來（更遠的畫在邊緣）
+    for (const f of mk.fills) if (f.px > 0) prices.push(f.px);
+    for (const o of mk.orders) if (o.px > 0 && (!ref || Math.abs(o.px / ref - 1) <= 0.03)) prices.push(o.px);
     let lo = Math.min(...prices);
     let hi = Math.max(...prices);
     if (!Number.isFinite(lo)) { lo = (ref || 1) * 0.99; hi = (ref || 1) * 1.01; }
@@ -92,6 +133,7 @@ export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs }, tipEl)
     for (const [v, c] of [[up, COL.up], [down, COL.down]]) {
       if (v && v <= hi && v >= lo) { g.strokeStyle = c; g.globalAlpha = 0.5; g.beginPath(); g.moveTo(padL, Y(v)); g.lineTo(padL + pw, Y(v)); g.stroke(); g.globalAlpha = 1; }
     }
+    drawOrderLines(g, mk.orders, { padL, pw, padT, ph, Y, lo, hi });
     if (!pts.length) {
       g.fillStyle = COL.dim; g.textAlign = 'center'; g.font = '500 13px "Noto Sans TC", sans-serif';
       g.fillText('今天還沒有成交', padL + pw / 2, padT + ph / 2);
@@ -119,6 +161,7 @@ export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs }, tipEl)
     g.lineTo(X(last.t), padT + ph); g.lineTo(X(pts[0].t), padT + ph); g.closePath();
     g.fillStyle = grd; g.fill();
     g.beginPath(); g.arc(X(last.t), Y(last.z), 3.5, 0, Math.PI * 2); g.fillStyle = lineC; g.fill();
+    for (const f of mk.fills) if (f.t >= t0 - 60e3 && f.t <= t1 + 120e3 && f.px > 0) drawFillDot(g, X(Math.min(t1, Math.max(t0, f.t))), Y(f.px), f.side);
     // 十字線
     if (hover != null) {
       let best = pts[0];
@@ -143,7 +186,14 @@ export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs }, tipEl)
 
 // ------------------------------------------------------------------ 日 K
 /** bars：[{d,o,h,l,c,v}]（已經做好分割調整） */
-export function drawK(cv, bars, tipEl) {
+export function drawK(cv, bars, tipEl, marks) {
+  const mk = marks || { orders: [], fills: [] };
+  const fillDays = new Map();     // 日期 → {B: 股數, S: 股數}
+  for (const f of mk.fills) {
+    const x = fillDays.get(f.d) || { B: 0, S: 0 };
+    x[f.side] += f.qty;
+    fillDays.set(f.d, x);
+  }
   let n = Math.min(bars.length, 70);
   let end = bars.length;
   let hover = null;
@@ -209,6 +259,15 @@ export function drawK(cv, bars, tipEl) {
       });
       g.strokeStyle = c; g.lineWidth = 1.4; g.globalAlpha = 0.85; g.stroke(); g.globalAlpha = 1;
     }
+    // 你的成交：買在 K 棒下面、賣在上面（寶藍三角形）
+    vis.forEach((b, i) => {
+      const fd = fillDays.get(b.d);
+      if (!fd) return;
+      const tri = (y, dir) => { g.beginPath(); g.moveTo(X(i), y); g.lineTo(X(i) - 5, y + dir * 8); g.lineTo(X(i) + 5, y + dir * 8); g.closePath(); g.fillStyle = '#5b8cff'; g.fill(); g.strokeStyle = '#eaf0ff'; g.lineWidth = 1; g.stroke(); };
+      if (fd.B) tri(Y(b.l) + 4, 1);
+      if (fd.S) tri(Y(b.h) - 4, -1);
+    });
+    drawOrderLines(g, mk.orders, { padL, pw, padT, ph, Y, lo, hi, left: true });   // 日 K 最新的在右邊，標籤放左邊
     // 圖例
     g.font = NUM; g.textAlign = 'left';
     let lx = padL + 2;
@@ -226,7 +285,9 @@ export function drawK(cv, bars, tipEl) {
       if (tipEl) {
         const prev = bars[off + i - 1];
         const pct = prev ? (b.c / prev.c - 1) * 100 : null;
-        tipEl.innerHTML = `<b>${Math.floor(b.d / 100) % 100}/${b.d % 100}</b> 開 ${fmt(b.o)} 高 ${fmt(b.h)} 低 ${fmt(b.l)} 收 ${fmt(b.c)}${pct != null ? ` <em class="${pct >= 0 ? 'up' : 'down'}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</em>` : ''} <span>${Math.round((b.v || 0) / 1000).toLocaleString()} 張</span>`;
+        const fd = fillDays.get(b.d);
+        const mine = fd ? ` <i class="you">你${fd.B ? ` 買 ${fd.B.toLocaleString()} 股` : ''}${fd.S ? ` 賣 ${fd.S.toLocaleString()} 股` : ''}</i>` : '';
+        tipEl.innerHTML = `<b>${Math.floor(b.d / 100) % 100}/${b.d % 100}</b> 開 ${fmt(b.o)} 高 ${fmt(b.h)} 低 ${fmt(b.l)} 收 ${fmt(b.c)}${pct != null ? ` <em class="${pct >= 0 ? 'up' : 'down'}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</em>` : ''} <span>${Math.round((b.v || 0) / 1000).toLocaleString()} 張</span>${mine}`;
         tipEl.hidden = false;
       }
     } else if (tipEl) tipEl.hidden = true;

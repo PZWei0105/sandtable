@@ -495,6 +495,26 @@ export function createTable(host, opts = {}) {
     kick();
   }
 
+  /** 縮時回放用：直接換成某個時間點的漲跌（不重排版、不補間），pcts 是 Map(代號 → 漲跌%) */
+  function setLive(pcts) {
+    if (!hexes) return;
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      const s = info.get(c);
+      if (!s) continue;
+      const v = pcts.get(c);
+      s.pct = Number.isFinite(v) ? v : null;
+      s.h0 = s.h1 = heightOf(s.pct);
+      hexes.setColorAt(i, colorOf(s.pct, tmpC));
+    }
+    hexes.instanceColor.needsUpdate = true;
+    anim = null;
+    pickBeams();
+    applyHeights(performance.now());
+    lastAct = performance.now();
+    kick();
+  }
+
   function applyHeights(now) {
     if (!hexes) return;
     for (let i = 0; i < codes.length; i++) {
@@ -874,7 +894,7 @@ export function createTable(host, opts = {}) {
 
   return {
     ok: true,
-    setData, setHeld, setPending, setWatch, select, ping,
+    setData, setLive, setHeld, setPending, setWatch, select, ping,
     ignite() { introT = reduced ? 1 : 0; kick(); },
     focus(c) {
       const p = cells.get(c);
@@ -961,6 +981,7 @@ function createFlat(host, wrap, opts) {
   return {
     ok: false,
     setData(items) { data = items; lay = layout(items); draw(); },
+    setLive(pcts) { data = data.map((x) => ({ ...x, pct: pcts.has(x.c) ? pcts.get(x.c) : null })); draw(); },
     setHeld(l) { held = new Set(l); draw(); },
     setPending(l) { pend = new Set(l); draw(); },
     setWatch(l) { watch = new Set(l); draw(); },

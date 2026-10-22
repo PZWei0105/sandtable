@@ -3,7 +3,7 @@ import * as R from './rules.js';
 import * as E from './engine.js';
 import * as D from './data.js';
 import * as ST from './store.js';
-import { navSeries, report, BENCH } from './stats.js';
+import { navSeries, report, dayReport, BENCH } from './stats.js';
 import { createTable, CAT_NAME } from './table3d.js';
 import { drawIntraday, drawK, drawNav } from './charts.js';
 import { fx, unlock, setSound, setHaptics, play } from './fx.js';
@@ -114,6 +114,7 @@ document.addEventListener('click', (e) => {
 
 // ------------------------------------------------------------------ 分頁
 function setTab(t) {
+  if (UI.replay && t !== 'table' && !window.matchMedia('(min-width:1100px)').matches) stopReplay();
   UI.tab = t;
   saveUI();
   $$('#dock button').forEach((b) => b.setAttribute('aria-current', b.dataset.tab === t ? 'page' : 'false'));
@@ -360,10 +361,12 @@ function initTable() {
   });
   host.querySelectorAll('.hud-top, .hud-bot, .stage-tip').forEach((x) => host.appendChild(x));
   $('#stageReset').addEventListener('click', () => { UI.table.reset(); play('tap'); });
+  $('#stageReplay').addEventListener('click', () => startReplay());
+  replayButton(false);
   updateTable(true);
 }
 function updateTable(intro) {
-  if (!UI.table) return;
+  if (!UI.table || UI.replay) return;
   UI.table.setData(tableItems(), { intro });
   markTable();
 }
@@ -477,16 +480,87 @@ function renderHud() {
   const tx = D.S.live && D.S.live.taiex;
   const txPct = tx && tx.z && tx.y ? (tx.z / tx.y - 1) * 100 : null;
   const a = $('#hudTx');
-  if (a) a.innerHTML = `<span class="k">加權指數 ${tx && tx.t ? esc(tx.t) : ''}</span><span class="v num ${cls(txPct)}">${tx && tx.z ? N(tx.z, 2) : '—'}<small>${PCT(txPct)}</small></span>`;
-  const items = tableItems().filter((x) => isNum(x.pct));
-  const up = items.filter((x) => x.pct > 0.001).length;
-  const dn = items.filter((x) => x.pct < -0.001).length;
-  const fl = items.length - up - dn;
-  const tot = Math.max(1, items.length);
-  const b = $('#hudBreadth');
-  if (b) b.innerHTML = `<div class="lb"><b class="up">漲 ${up}</b><span>平 ${fl}</span><b class="down">跌 ${dn}</b></div><div class="track"><i class="u" style="width:${(up / tot) * 100}%"></i><i class="f" style="width:${(fl / tot) * 100}%"></i><i class="d" style="width:${(dn / tot) * 100}%"></i></div>`;
+  if (a && !UI.replay) { a.classList.remove('rp'); a.innerHTML = `<span class="k">加權指數 ${tx && tx.t ? esc(tx.t) : ''}</span><span class="v num ${cls(txPct)}">${tx && tx.z ? N(tx.z, 2) : '—'}<small>${PCT(txPct)}</small></span>`; }
+  if (!UI.replay) renderBreadth(tableItems().map((x) => x.pct));
   const c = $('#hudClose');
   if (c) c.innerHTML = hudCountdown(now());
+}
+/** 漲跌家數（HUD 下方那條） */
+function renderBreadth(pcts) {
+  const v = pcts.filter(isNum);
+  const up = v.filter((x) => x > 0.001).length;
+  const dn = v.filter((x) => x < -0.001).length;
+  const fl = v.length - up - dn;
+  const tot = Math.max(1, v.length);
+  const b = $('#hudBreadth');
+  if (b) b.innerHTML = `<div class="lb"><b class="up">漲 ${up}</b><span>平 ${fl}</span><b class="down">跌 ${dn}</b></div><div class="track"><i class="u" style="width:${(up / tot) * 100}%"></i><i class="f" style="width:${(fl / tot) * 100}%"></i><i class="d" style="width:${(dn / tot) * 100}%"></i></div>`;
+}
+
+// ------------------------------------------------------------------ 今日縮時：把今天 09:00 到現在的盤勢在戰術台上快轉播一遍（只用 spark.json 的真實走勢，純顯示）
+function replaySeries() {
+  const rows = D.S.summary ? D.S.summary.etfs : [];
+  const ser = [];
+  let tMax = 0;
+  for (const r of rows) {
+    const sp = D.sparkOf(r.c);
+    if (!sp.intra || !(sp.ref > 0) || !sp.pts.length) continue;
+    ser.push({ c: r.c, pts: sp.pts, ref: sp.ref, i: -1 });
+    tMax = Math.max(tMax, sp.pts[sp.pts.length - 1][0]);
+  }
+  return { ser, tMax: Math.min(tMax, 285), day: D.S.spark && D.S.spark.d };
+}
+function replayButton(on) {
+  const b = $('#stageReplay');
+  if (!b) return;
+  b.classList.toggle('on', on);
+  b.innerHTML = on ? '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>停止' : '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>今日縮時';
+}
+function stopReplay(restore = true) {
+  const rp = UI.replay;
+  if (!rp) return;
+  if (rp.raf) cancelAnimationFrame(rp.raf);
+  clearTimeout(rp.end);
+  UI.replay = null;
+  replayButton(false);
+  if (restore) { updateTable(false); renderHud(); }
+}
+function startReplay() {
+  if (UI.replay) { stopReplay(); return; }
+  if (!UI.table || !UI.table.setLive) return;
+  const { ser, tMax, day } = replaySeries();
+  if (!ser.length || tMax < 5) { note('今天還沒有盤中走勢可以回放（開盤後幾分鐘就有）'); return; }
+  const dur = Math.max(9000, Math.min(20000, (tMax / 270) * 20000));
+  const t0 = performance.now();
+  UI.replay = { t0, raf: 0, end: 0 };
+  replayButton(true);
+  const chip = $('#hudTx');
+  chip.classList.add('rp');
+  const label = `今日縮時 ${day ? `${MD(day)}（${WD(day)}）` : ''}`;
+  UI.table.reset();
+  fx('send');
+  let lastMark = -1;
+  const frame = (nowP) => {
+    if (!UI.replay || UI.replay.t0 !== t0) return;
+    const k = Math.min(1, (nowP - t0) / dur);
+    const t = tMax * k;
+    const pcts = new Map();
+    for (const x of ser) {
+      while (x.i + 1 < x.pts.length && x.pts[x.i + 1][0] <= t) x.i++;
+      const px = x.i >= 0 ? x.pts[x.i][1] : x.ref;   // 第一筆成交之前：還在昨收
+      pcts.set(x.c, (px / x.ref - 1) * 100);
+    }
+    UI.table.setLive(pcts);
+    renderBreadth([...pcts.values()]);
+    const mm = Math.min(270, Math.round(t));
+    chip.innerHTML = `<span class="k">${label}</span><span class="v num">${String(9 + Math.floor(mm / 60)).padStart(2, '0')}:${String(mm % 60).padStart(2, '0')}</span><span class="rb"><i style="width:${(k * 100).toFixed(1)}%"></i></span>`;
+    const mark = Math.floor(t / 30);    // 每 30 分鐘一聲聲納
+    if (mark !== lastMark) { lastMark = mark; if (k < 1 && mark > 0) play('sand'); }
+    if (k < 1) { UI.replay.raf = requestAnimationFrame(frame); return; }
+    UI.replay.raf = 0;
+    play('stamp');
+    UI.replay.end = setTimeout(() => { if (UI.replay && UI.replay.t0 === t0) stopReplay(); }, 1800);
+  };
+  UI.replay.raf = requestAnimationFrame(frame);
 }
 
 // ------------------------------------------------------------------ 沙盤頁：選定目標、自選、今天最熱、漲跌排行、你的部位、消息
@@ -527,6 +601,7 @@ function renderTablePane() {
         <div><div class="px ${cls(ch.pct)} ${tflash}" id="tgtPx">${P(ch.px)}</div><div class="ch ${cls(ch.pct)}">${isNum(ch.ch) ? `${ch.ch > 0 ? '▲' : ch.ch < 0 ? '▼' : ''}${Math.abs(ch.ch).toFixed(2)}` : ''} ${PCT(ch.pct)}</div></div>
         ${sparkSVG(sel.c, 320, 46)}</div>
       <div class="row" style="margin-top:12px"><button class="btn grow" data-go="quote">看盤</button><button class="btn buy grow" data-trade="B">買進</button><button class="btn sell grow" data-trade="S">賣出</button></div></div>` : ''}
+    ${r ? `<div id="dayRep">${UI.dayRepHTML || ''}</div>` : ''}
     <div class="dossier"><div class="tab">自選 <small>${watch.length} 檔・點星號加減</small></div>
       <div class="rail">${watch.map(card).join('')}<button class="card add" type="button" data-go="list"><span><b>＋</b>加自選</span></button></div></div>
     <div class="dossier"><div class="tab">今天最熱 <small>成交值最大的 8 檔</small></div>
@@ -550,6 +625,44 @@ function renderTablePane() {
     const tr = e.target.closest('[data-trade]');
     if (tr) openTicket(UI.sel, tr.dataset.trade);
   };
+  fillDayReport();
+}
+
+// ------------------------------------------------------------------ 今日戰報：今天賺賠多少、和 0050 比、每一檔的貢獻
+let dayRepBusy = false;
+async function fillDayReport() {
+  const box = $('#dayRep');
+  const r = run();
+  if (!box || !r || dayRepBusy) return;
+  dayRepBusy = true;
+  try {
+    const codes = [...new Set([...(r.fills || []).map((f) => f.code), BENCH])];
+    await Promise.all(codes.map((c) => D.ensureHist(c)));
+    const h = D.S.hist.get(BENCH);
+    const t = now();
+    const { d: today, hm } = R.tw(t);
+    if (!h || !h.d || !h.d.length) return;
+    const day = R.isTradingDay(D.S.cal, today) && hm >= 900 ? today : h.d.filter((d) => d < today).pop();
+    const prevDay = day ? h.d.filter((d) => d < day).pop() : null;
+    const el = $('#dayRep');
+    if (!el || !day || !prevDay || r.start.d > day) { UI.dayRepHTML = ''; if (el) el.innerHTML = ''; return; }
+    const rep = dayReport(r, mkt(), (c) => D.S.hist.get(c), t, prevDay, day);
+    const live = rep.live && hm < 1330;
+    const stamp = live ? '<span class="stamp live">盤中即時</span>' : rep.live && hm < 1430 ? '<span class="stamp wait">收盤・等盤後</span>' : '<span class="stamp filled">結算</span>';
+    const diff = isNum(rep.ret) && isNum(rep.bench) ? rep.ret - rep.bench : null;
+    const allCash = !rep.rows.length;
+    const maxAbs = Math.max(1, ...rep.rows.map((x) => Math.abs(x.pnl)));
+    UI.dayRepHTML = `<div class="dossier you dayrep"><div class="tab">${live ? '今日戰報' : `${rep.live ? '今日' : MD(day)}戰報`} <small>${MD(day)}（${WD(day)}）${rep.started ? '・開局第一天' : ''}</small></div><div class="act">${stamp}</div>
+      <div class="dr-hero">
+        <div><span class="k">${rep.live ? '今天' : '那天'}損益</span><b class="num ${cls(rep.pnl)}">${rep.pnl > 0 ? '+' : ''}${N(Math.round(rep.pnl))}</b><span class="num ${cls(rep.ret)}">${RET(rep.ret)}</span></div>
+        <div><span class="k">0050 同一天（含息）</span><b class="num ${cls(rep.bench)}">${RET(rep.bench)}</b><span class="note2">${allCash ? '你全部是現金，沒有漲跌' : diff == null ? '' : Math.abs(diff) < 0.00005 ? '和 0050 一樣' : diff > 0 ? `<b class="up">贏 0050 ${(diff * 100).toFixed(2)} 個百分點</b>` : `<b class="down">輸 0050 ${(-diff * 100).toFixed(2)} 個百分點</b>`}</span></div>
+      </div>
+      <div class="dr-line">成交 ${rep.fills} 筆${rep.buyAmt ? ` ・ 買進 ${N(rep.buyAmt)}` : ''}${rep.sellAmt ? ` ・ 賣出 ${N(rep.sellAmt)}` : ''} ・ 手續費 ${N(rep.fees)}${rep.taxes ? ` ・ 證交稅 ${N(rep.taxes)}` : ''}</div>
+      ${rep.rows.length ? `<div class="dr-list">${rep.rows.slice(0, 6).map((x) => `<div class="mv ${x.pnl >= 0 ? 'up' : 'down'}" data-code="${x.code}"><i style="width:${Math.max(3, (Math.abs(x.pnl) / maxAbs) * 100)}%"></i><div><b>${x.code}</b><small>${esc((D.row(x.code) || {}).n || '')}${x.div ? `・配息 ${N(x.div)}` : ''}</small></div><span class="${cls(x.pnl)}">${x.pnl > 0 ? '+' : ''}${N(Math.round(x.pnl))}</span></div>`).join('')}</div>` : ''}
+      ${Math.abs(rep.other) >= 1 ? `<p class="note">其他 ${N(Math.round(rep.other))} 元（不是哪一檔的漲跌，例如入金出金）。</p>` : ''}
+      <p class="note">${live ? '盤中用最新成交價算，收盤後才定案；' : ''}每一檔的貢獻＝今天的市值－昨天收盤的市值－買進花的錢＋賣出拿回的錢＋配息，手續費、證交稅都扣掉了。</p></div>`;
+    el.innerHTML = UI.dayRepHTML;
+  } finally { dayRepBusy = false; }
 }
 
 // ------------------------------------------------------------------ 看盤：全部 ETF 清單（類別、搜尋、排序）＋單檔
@@ -595,6 +708,23 @@ function renderQuoteList(el) {
     const li = e.target.closest('[data-code]');
     if (li) { selectCode(li.dataset.code, false); UI.qmode = 'detail'; play('tap'); renderQuote(); window.scrollTo({ top: 0 }); }
   };
+}
+
+/** 走勢圖上要畫的：這一檔還掛著的限價委託（剩下的股數）、所有成交 */
+function chartMarks(r, code) {
+  if (!r) return { orders: [], fills: [] };
+  const t = now();
+  const orders = [];
+  for (const o of r.orders) {
+    if (o.code !== code || !(o.px > 0)) continue;
+    const st = E.orderStatus(r, o);
+    if (!['wait', 'queued', 'live', 'part'].includes(st.st)) continue;
+    const left = E.qtyAt(o, r.mods || [], t).q - st.filled;
+    if (left <= 0) continue;
+    orders.push({ px: o.px, side: o.side, lbl: SH(left) });
+  }
+  const fills = (r.fills || []).filter((f) => f.code === code).map((f) => ({ t: f.t, d: f.d, px: f.px, side: f.side, qty: f.qty, sess: f.sess }));
+  return { orders, fills };
 }
 
 async function renderQuote() {
@@ -665,7 +795,8 @@ async function renderQuote() {
     if (tr) openTicket(code, tr.dataset.trade);
   };
   if (!r0) return;
-  // 圖
+  // 圖：你掛著的委託（虛線）、你的成交（圓點／三角形）一起畫上去
+  const marks = chartMarks(r, code);
   const cv = $('#qChart', el);
   if (UI.chart === 'intra') {
     const tp = await D.ensureTape(code);
@@ -675,7 +806,7 @@ async function renderQuote() {
     const d = rec ? rec.d : qd || R.tw(now()).d;
     const m = mkt();
     const ticks = rec ? (m.ticks(code, d, 'reg') || []) : [];
-    drawIntraday(cv, { ticks, ref: rec && rec.y ? rec.y : ch.ref, up: rec ? rec.u : lim.up, down: rec ? rec.w : lim.down, d, nowMs: now() }, $('#qTip', el));
+    drawIntraday(cv, { ticks, ref: rec && rec.y ? rec.y : ch.ref, up: rec ? rec.u : lim.up, down: rec ? rec.w : lim.down, d, nowMs: now(), marks: { orders: marks.orders, fills: marks.fills.filter((f) => f.d === d && f.sess !== 'dca') } }, $('#qTip', el));
   } else {
     const k = await D.ensureK(code);
     if (UI.sel !== code || !cv.isConnected) return;
@@ -687,7 +818,7 @@ async function renderQuote() {
     }).filter((b) => b.c > 0) : [];
     // 今天盤中：補上今天這一根
     if (q && q.z && q.o && bars.length && q.d > bars[bars.length - 1].d) bars.push({ d: q.d, o: q.o, h: q.h, l: q.l, c: q.z, v: q.v });
-    drawK(cv, bars, $('#qTip', el));
+    drawK(cv, bars, $('#qTip', el), marks);
   }
 }
 
