@@ -1165,6 +1165,7 @@ function openTicket(code, side) {
     </div>`;
   }
   function errHTML(k) {
+    if (k.c.win && k.c.win.blocked) return '';   // 上面的琥珀框已經說明了
     return k.errs.length ? `<div class="err">${k.errs.map(esc).join('<br>')}</div>` : '';
   }
   function bind() {

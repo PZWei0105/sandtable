@@ -103,6 +103,12 @@ export function advance(o, prog0, mods, mkt, nowMs) {
   const nextOpen = () => atTW(nextTradingDay(mkt.cal, D), 900);
   const sessFrom = { reg: w.regFrom, odd: w.oddFrom, oddpm: w.oddpmFrom, fix: w.fixFrom }[o.sess] || w.regFrom;
 
+  // 還沒開始撮合（預約單、開盤前、盤中零股第一次撮合前、盤後單 14:30 前）就刪單：不可能已經成交，馬上確定
+  const startAt = o.sess === 'fix' || o.sess === 'oddpm' ? atTW(D, 1430) : atTW(D, o.sess === 'odd' ? w.oddFirst : w.regOpen);
+  if (prog.st === 'wait' && o.at < startAt) {
+    const c = mods.find((m) => m.oid === o.id && m.kind === 'cancel' && m.at < startAt && m.at <= nowMs);
+    if (c) { finish('cancelled', '已刪單', c.at); return out; }
+  }
   if (nowMs < atTW(D, sessFrom)) return out;           // 預約單：還沒到那一天
   if (!isTradingDay(mkt.cal, D)) {                      // 那天後來休市（颱風假）：預約單作廢
     if (nowMs > atTW(D, 1430)) finish('expired', `${fmtD(D)} 休市，委託失效`, atTW(D, 1430));
@@ -202,7 +208,9 @@ export function advance(o, prog0, mods, mkt, nowMs) {
       Object.assign(prog, { st: 'live', act: o.at, L: -Infinity, H: Infinity, zt0: Infinity, cut: Infinity });
     } else {
       // 盤中送出：在委託之後的第一筆快照到達，看那一刻的五檔能吃多少
-      const t1 = ticksAll.find((x) => x.t > o.at);
+      let t1 = ticksAll.find((x) => x.t > o.at);
+      // 下一筆快照已經是 13:25 以後（收盤集合競價的委託簿）：不拿來逐筆撮合，只參加 13:30 收盤撮合
+      if (t1 && t1.t >= auctionAt) t1 = null;
       if (!t1) {
         // 之後一直沒有新快照（後台斷線）：收盤後只能用收盤集合競價判斷
         if (!(nowMs >= postAt && isNum(day.c))) return out;

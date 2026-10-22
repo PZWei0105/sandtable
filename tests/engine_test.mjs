@@ -170,6 +170,11 @@ test('開盤前委託：等於開盤價不算，之後跌破才成交', () => {
   const r = run1(o, mk({ day, ticks: { '0050': { [D]: { reg: ticks } } } }), T(907));
   assert.deepEqual(r.fills.map((f) => [f.px, f.how]), [[100.1, 'through']]);
 });
+test('預約單在開盤前刪單：馬上確定，不用等行情', () => {
+  const o = order({ at: T(1500), day: D2, phase: 'reserve', px: 100 });
+  const r = run1(o, mk(), T(2000), [{ oid: 'o1', at: T(1900), kind: 'cancel' }]);
+  assert.equal(r.done.st, 'cancelled');
+});
 test('預約單超出隔天漲跌停：交易所退單', () => {
   const day = { '0050': { [D2]: { o: 100, u: 105, w: 95 } } };
   const o = order({ at: T(1500), day: D2, phase: 'reserve', px: 106 });
@@ -192,6 +197,15 @@ test('13:30 收盤沒有撮合成交（最後成交在早上）：掛單不能�
   const r = run1(order({ at: T(1100), px: 20.05 }), mk({ day, ticks: { '0050': { [D]: { reg: ticks } } } }), T(1335));
   assert.equal(r.fills.length, 0);
   assert.equal(r.done.st, 'expired');
+});
+test('13:25 前送出、下一筆快照已經是收盤競價時段：不用競價委託簿成交，只參加收盤撮合', () => {
+  const day = { '0050': { [D]: { c: 100.2, u: 110, w: 90 } } };
+  const ticks = [tk(1326, 0, { a: [[99.5, 9000]], l: 99.9, z: 100, zt: T(1324) }), tk(1331, 0, { z: 100.2, zt: T(1330) })];
+  const m = mk({ day, ticks: { '0050': { [D]: { reg: ticks } } } });
+  let r = run1(order({ at: T(1324, 50), px: 100, ref: { a1: 100.05 } }), m, T(1327));
+  assert.equal(r.fills.length, 0);
+  r = run1(order({ at: T(1324, 50), px: 100.3, ref: { a1: 100.05 } }), m, T(1335));
+  assert.deepEqual(r.fills.map((f) => [f.px, f.how]), [[100.2, 'close']]);
 });
 test('收盤價還沒出來：先不判定', () => {
   const ticks = [tk(1005, 0, { a: [[100.1, 3000]], l: 99.98, z: 100.1, zt: T(1004) })];
