@@ -90,11 +90,15 @@ export async function refresh(force = false, tapeCodes = null) {
 function rebuildCal() {
   const raw = S.calRaw || {};
   const cal = makeCal(raw);
-  // 平日 09:15 以後，證交所的資料還停在之前的日期：今天休市（颱風假）
-  const now = serverNow();
-  const { d, hm } = tw(now);
+  // 今天休市（颱風假）：後台今天 09:15 以後有跑，但證交所的資料還停在之前的日期。
+  // 只看後台自己的判斷（live.json 的 at 是後台這一輪的時間）；後台沒跑不代表休市，不能亂判。
   const qd = quotesDay();
-  if (dow(d) > 0 && dow(d) < 6 && hm >= 915 && qd && qd < d && !cal.holidays.has(d)) S.closedToday.add(d);
+  const L = S.live;
+  const at = L && L.at ? Date.parse(L.at) : NaN;
+  if (Number.isFinite(at)) {
+    const { d, hm } = tw(at);
+    if (dow(d) > 0 && dow(d) < 6 && hm >= 915 && L.date && L.date < d && !cal.holidays.has(d)) S.closedToday.add(d);
+  }
   for (const x of S.closedToday) cal.closed.add(x);
   if (qd) cal.open.add(qd);
   S.cal = cal;
