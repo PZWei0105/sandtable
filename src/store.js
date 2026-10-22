@@ -84,10 +84,13 @@ export function newRun(db, { capital, at, d, bench, fees }) {
 /** 結束這一局（封存，不能刪） */
 export function endRun(db, id, summary) {
   const r = db.runs[id];
-  if (!r || r.end) return;
+  if (!r || r.end) return false;
+  // 還有委託沒結束（沒有結束狀態）不能封存：封存不能拿來躲成交
+  if ((r.orders || []).some((o) => !(r.finals || {})[o.id])) return false;
   r.end = summary;
   r.prog = {};
   if (db.cur === id) db.cur = null;
+  return true;
 }
 
 export function newId(prefix, at) {
@@ -312,7 +315,8 @@ function mergeRun(a, b) {
   a.plans = [...plans.values()];
   a.dcaLog = { ...b.dcaLog, ...(a.dcaLog || {}) };
   a.restores = unionBy(a.restores || [], b.restores, (x) => `${x.at}|${x.from}`);
-  if (!a.end && b.end) { a.end = b.end; a.prog = {}; }
+  // 備份裡這一局已經封存：合併後還有沒結束的委託（例如這支手機多送的單）就不跟著封存（封存不能拿來躲成交）
+  if (!a.end && b.end && !(a.orders || []).some((o) => !a.finals[o.id])) { a.end = b.end; a.prog = {}; }
 }
 
 /**

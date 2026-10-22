@@ -142,5 +142,34 @@ await test('今日戰報：每一檔的貢獻加起來＝總資產的變化；�
   assert.ok(Math.abs(rep2.bench - (105 / 103 - 1)) < 1e-9);
 });
 
+await test('N5 還有委託沒結束不能封存（封存不能拿來躲成交）', async () => {
+  let id;
+  ST.update((db) => { id = ST.newRun(db, { capital: 1e6, at: T(900), d: 20261022, bench: 100, fees: db.settings.fees }).id; });
+  ST.update((db) => { db.runs[id].orders.push({ id: 'o1', at: T(1000), code: '0050', side: 'B', sess: 'reg', type: 'L', tif: 'ROD', px: 100, qty: 1000, day: 20261022, phase: 'continuous', ref: {} }); });
+  let ok;
+  ST.update((db) => { ok = ST.endRun(db, id, { at: T(1100), d: 20261022 }); });
+  assert.equal(ok, false);
+  assert.equal(ST.load().runs[id].end, null);
+  ST.update((db) => { db.runs[id].finals.o1 = { st: 'cancelled', why: '已刪單', t: T(1005) }; });
+  ST.update((db) => { ok = ST.endRun(db, id, { at: T(1100), d: 20261022 }); });
+  assert.equal(ok, true);
+  assert.equal(ST.load().cur, null);
+});
+await test('N5 還原備份：備份裡這一局已經封存，但手機上還有沒結束的委託，就不跟著封存', async () => {
+  let id;
+  ST.update((db) => { id = ST.newRun(db, { capital: 1e6, at: T(900), d: 20261022, bench: 100, fees: db.settings.fees }).id; });
+  const blank = ST.load();
+  // 另一支手機：同一局沒有委託，封存了
+  ST.update((db) => { ST.endRun(db, id, { at: T(1100), d: 20261022 }); });
+  const ended = await ST.exportBackup(T(1101));
+  // 這支手機：同一局還有一張掛著的單
+  localStorage.setItem('sandtable.v1', JSON.stringify(blank));
+  ST.update((db) => { db.runs[id].orders.push({ id: 'o1', at: T(1000), code: '0050', side: 'B', sess: 'reg', type: 'L', tif: 'ROD', px: 100, qty: 1000, day: 20261022, phase: 'continuous', ref: {} }); });
+  await ST.importBackup(ended, T(1200));
+  const db = ST.load();
+  assert.equal(db.runs[id].end, null, '掛著的單還沒結束：這一局繼續');
+  assert.equal(db.cur, id);
+});
+
 console.log(`\n${pass} 通過，${fail} 失敗`);
 process.exit(fail ? 1 : 0);

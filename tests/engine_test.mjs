@@ -561,5 +561,117 @@ test('資料一筆一筆進來慢慢算，和一次算完結果一樣（之後�
   assert.equal(done && done.st, one.done.st);
 });
 
+// ------------------------------------------------------------------ 第二次獨立檢查找到的漏洞（2026/10/22）
+const { confirmedMods, reserveOf } = await import('../src/engine.js');
+
+test('N4 自己的委託不能重複吃同一批量：拆成 10 筆和 1 筆大單結果一樣', () => {
+  const m = mk({ ticks: { '0050': { [D]: { reg: [tk(1004, 0, { a: [[100.0, 1000], [100.5, 50000]], b: [[99.9, 50000]], h: 100.6, l: 99.8, z: 100.0, zt: T(1003, 50), v: 1e6 })] } } }, last: { '0050': 100 } });
+  const ord = (id, qty) => order({ id, at: T(1001), tif: 'IOC', px: 100.5, qty, ref: { a1: 100.0, b1: 99.9 } });
+  const one = processRun({ ...baseRun(), orders: [ord('big', 10000)] }, m, T(1005));
+  const ten = processRun({ ...baseRun(), orders: Array.from({ length: 10 }, (_, i) => ord(`s${i}`, 1000)) }, m, T(1005));
+  const amt = (fs) => fs.reduce((s, f) => s + f.amt, 0);
+  assert.equal(ten.newFills.filter((f) => f.px === 100).length, 1, '100.00 只掛 1 張，只有最早的那一筆吃得到');
+  assert.equal(ten.newFills.reduce((s, f) => s + f.qty, 0), 10000);
+  assert.equal(amt(ten.newFills), amt(one.newFills), '拆單不會比較便宜');
+  // 限價 100.00 的 10 筆：只有第一筆成交，其他 IOC 取消
+  const lim = processRun({ ...baseRun(), orders: Array.from({ length: 10 }, (_, i) => order({ id: `t${i}`, at: T(1001), tif: 'IOC', px: 100, qty: 1000, ref: { a1: 100.0, b1: 99.9 } })) }, m, T(1005));
+  assert.equal(lim.newFills.length, 1);
+  assert.equal(Object.values(lim.finals).filter((x) => x.st === 'cancelled').length, 9);
+});
+test('N4 分兩次算（另一筆委託之後才算）結果一樣：吃掉的量從存下來的成交算', () => {
+  const m = mk({ ticks: { '0050': { [D]: { reg: [tk(1004, 0, { a: [[100.0, 1000], [100.5, 50000]], z: 100.0, zt: T(1003, 50), v: 1e6 })] } } }, last: { '0050': 100 } });
+  const a = order({ id: 'a', at: T(1001), tif: 'IOC', px: 100.5, qty: 1000, ref: { a1: 100.0, b1: 99.9 } });
+  const b = order({ id: 'b', at: T(1002), tif: 'IOC', px: 100.5, qty: 1000, ref: { a1: 100.0, b1: 99.9 } });
+  let r = { ...baseRun(), orders: [a] };
+  r = mergeProgress(r, processRun(r, m, T(1005)));
+  r = { ...r, orders: [a, b] };
+  r = mergeProgress(r, processRun(r, m, T(1005)));
+  const both = processRun({ ...baseRun(), orders: [a, b] }, m, T(1005));
+  assert.deepEqual(r.fills.map((f) => [f.oid, f.qty, f.px]), both.newFills.map((f) => [f.oid, f.qty, f.px]));
+  assert.equal(r.fills.find((f) => f.oid === 'b').px, 100.5, '第二筆吃不到已經被第一筆吃掉的 100.00');
+});
+test('N4 盤後定價：對手方剩下 50 張，三筆 50 張的買單只有最早的那筆成交', () => {
+  const fx = (id, at) => order({ id, at, sess: 'fix', type: 'C', px: 100, qty: 50000, phase: 'afterhours', ref: {} });
+  const m = mk({ after: { [D]: { '0050': [100, 0, 1e6, 0, 50000] } }, day: { '0050': { [D]: { c: 100 } } }, last: { '0050': 100 } });
+  const res = processRun({ ...baseRun(), capital: 1e8, orders: [fx('f2', T(1406)), fx('f1', T(1405)), fx('f3', T(1407))] }, m, T(1600));
+  assert.deepEqual(res.newFills.map((f) => [f.oid, f.qty]), [['f1', 50000]]);
+  assert.equal(res.finals.f2.st, 'expired');
+  assert.equal(res.finals.f3.st, 'expired');
+});
+test('N3 只參加收盤撮合的單：13:30 以後才送的刪單來不及，圈存照樣圈著，收盤成交照算', () => {
+  const co = order({ id: 'co', at: T(1326), px: 110, qty: 9000, phase: 'closing', ref: { a1: 105.1, b1: 105 } });
+  let run = { ...baseRun(), orders: [co] };
+  const before = mk({ last: { '0050': 105 }, day: { '0050': { [D]: { u: 115.5, w: 94.5, c: null } } } });
+  run = mergeProgress(run, processRun(run, before, T(1327)));
+  assert.equal(run.prog.co.co, true, '13:25 以後送的單只參加收盤撮合');
+  const need = reserveOf(co, 9000, run.fees);
+  run = { ...run, mods: [{ id: 'm1', oid: 'co', at: T(1330, 30), kind: 'cancel', qty: 0 }] };
+  run = mergeProgress(run, processRun(run, before, T(1331)));
+  assert.deepEqual(confirmedMods(run, co, T(1400)), [], '13:30 以後的刪單不算確認');
+  const L = ledger(run, before, T(1400));
+  assert.equal(L.reserved, need, '圈存沒有放掉');
+  assert.ok(L.avail < 10000, '不能拿同一筆錢再下一張單');
+  const after = mk({ last: { '0050': 105 }, day: { '0050': { [D]: { u: 115.5, w: 94.5, c: 105 } } } });
+  run = mergeProgress(run, processRun(run, after, T(1640)));
+  assert.deepEqual(run.fills.map((f) => [f.qty, f.px, f.how]), [[9000, 105, 'close']]);
+  assert.equal(run.finals.co.st, 'filled');
+});
+test('N3 只參加收盤撮合的單：13:30 以前送的刪單馬上生效、圈存放掉', () => {
+  const co = order({ id: 'co', at: T(1326), px: 110, qty: 9000, phase: 'closing', ref: { a1: 105.1, b1: 105 } });
+  let run = { ...baseRun(), orders: [co] };
+  const before = mk({ last: { '0050': 105 }, day: { '0050': { [D]: { u: 115.5, w: 94.5, c: null } } } });
+  run = mergeProgress(run, processRun(run, before, T(1327)));
+  run = { ...run, mods: [{ id: 'm1', oid: 'co', at: T(1328), kind: 'cancel', qty: 0 }] };
+  assert.equal(confirmedMods(run, co, T(1329)).length, 1);
+  assert.equal(ledger(run, before, T(1329)).reserved, 0);
+  run = mergeProgress(run, processRun(run, before, T(1329)));
+  assert.equal(run.finals.co.st, 'cancelled');
+});
+test('N1 那天結束了、快照少了最後一段、官方日 K 還沒拿到（undefined）：等，不下結論', () => {
+  const o = order({ id: 'w1', at: T(1000), px: 99, ref: { a1: 100.5, b1: 100.4 } });
+  const ticks = [tk(1003, 0, { a: [[100.5, 5000]], b: [[100.4, 5000]], l: 99.8, h: 100.6, z: 100.4, zt: T(1002) })];
+  const base = { ticks: { '0050': { [D]: { reg: ticks } } }, fin: { '0050': { [D]: true } } };
+  const m0 = mk(base);
+  m0.official = () => undefined;
+  let r = run1(o, m0, T(1700));
+  assert.equal(r.done, null, '官方日 K 抓不到：委託留著等');
+  assert.equal(r.fills.length, 0);
+  // 官方日 K 拿到了：最低 98.5 穿過 99 → 用委託價成交
+  const m1 = mk({ ...base, official: { '0050': { [D]: { o: 100.5, h: 100.8, l: 98.5, c: 99.2 } } } });
+  r = advance(o, r.prog, [], m1, T(1700));
+  assert.deepEqual(r.fills.map((f) => [f.qty, f.px, f.how]), [[1000, 99, 'through']]);
+  // 刪單之後沒有下一筆、官方日 K 還沒拿到：刪單先不成立
+  const mods = [{ oid: 'w1', at: T(1100), kind: 'cancel', qty: 0 }];
+  r = run1(o, m0, T(1700), mods);
+  assert.equal(r.done, null, '沒看到刪單之後的證據，不能讓刪單成立');
+  r = advance(o, r.prog, mods, m1, T(1700));
+  assert.equal(r.fills.length, 1, '刪單之後那一段其實已經穿價：成交在先');
+});
+test('13:25 前送出、下一筆快照已經是收盤競價：送出之後有人用更好的價格成交，算盤中就成交（之前的刪單來不及）', () => {
+  const o = order({ id: 'lt', at: T(1320), px: 100, qty: 2000, ref: { a1: 100.2, b1: 100.1 } });
+  const ticks = [
+    tk(1318, 0, { a: [[100.2, 5000]], b: [[100.1, 5000]], z: 100.2, zt: T(1317, 50), l: 100.0, h: 100.6 }),
+    tk(1327, 0, { a: [[99.8, 5000]], b: [[99.7, 5000]], z: 99.9, zt: T(1324, 30), l: 99.85, h: 100.6 }),
+  ];
+  const m = mk({ ticks: { '0050': { [D]: { reg: ticks } } } });
+  let r = run1(o, m, T(1328));
+  assert.deepEqual(r.fills.map((f) => [f.qty, f.px, f.how]), [[2000, 100, 'through']]);
+  assert.equal(r.done && r.done.st, 'filled');
+  r = run1(o, m, T(1328), [{ oid: 'lt', at: T(1322), kind: 'cancel', qty: 0 }]);
+  assert.equal(r.done && r.done.st, 'filled', '13:22 的刪單來不及');
+  // 最後一筆成交在送出之前：沒有證據，只參加收盤撮合
+  const m2 = mk({ ticks: { '0050': { [D]: { reg: [ticks[0], { ...ticks[1], z: 99.9, zt: T(1319, 30) }] } } } });
+  r = run1(o, m2, T(1328));
+  assert.equal(r.fills.length, 0);
+  assert.equal(r.prog.co, true);
+});
+test('全部成交的單馬上結束，不用等官方日 K', () => {
+  const o = order({ id: 'f1', at: T(1000), px: 100.5, ref: { a1: 100.5, b1: 100.4 } });
+  const m0 = mk({ ticks: { '0050': { [D]: { reg: [tk(1003, 0, { a: [[100.5, 5000]], b: [[100.4, 5000]] })] } } }, fin: { '0050': { [D]: true } } });
+  m0.official = () => undefined;
+  const r = run1(o, m0, T(1700));
+  assert.equal(r.done && r.done.st, 'filled');
+});
+
 console.log(`\n${pass} 通過，${fail} 失敗`);
 process.exit(fail ? 1 : 0);

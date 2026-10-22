@@ -13,8 +13,8 @@
      mkt.cal                         交易日曆（rules.makeCal）
      mkt.ticks(code, d, 'reg'|'odd') 那一天的逐輪快照 [{t: 資料時間, z, zt, h, l, v, a:[[價,股]], b:[[價,股]]}]（依 t 遞增），沒有就 null
      mkt.final(code, d)              那一天的盤中行情是不是已經結束、不會再有新的快照（true／false）
-     mkt.day(code, d)                那一天的 {o,h,l,c,v,u,w,y}（收盤價 c 要確定了才有），沒有就 null
-     mkt.official(code, d)           那一天的官方日 K {o,h,l,c}（收盤後才有），沒有就 null
+     mkt.day(code, d)                那一天的 {o,h,l,c,v,u,w,y}（收盤價 c：數字／null 確定沒有／undefined 還不知道），沒有就 null
+     mkt.official(code, d)           那一天的官方日 K {o,h,l,c}；null＝確定沒有；undefined＝還不知道（要等）
      mkt.oddOpen(code, d)            盤中零股第一次撮合價
      mkt.closeAuction(code, d, kind) 13:30 收盤撮合：{known: 結果確定了沒, px: 13:30 撮合成交價（沒成交是 null）}
      mkt.after(code, d)              證交所盤後結果 [盤後零股價, 股數, 盤後定價股數, 定價剩下的買量, 定價剩下的賣量]；
@@ -57,19 +57,46 @@ function remainingAt(o, mods, t, filled) {
   return Math.max(0, q - filled);
 }
 
-/** 從五檔依價格吃單：side B 吃賣方（a 由低到高），S 吃買方（b 由高到低）。limit=null 表示市價。 */
-export function walkBook(levels, side, qty, limit) {
+/**
+ * 從五檔依價格吃單：side B 吃賣方（a 由低到高），S 吃買方（b 由高到低）。limit=null 表示市價。
+ * skip：同一筆快照、同一邊，你自己比較早的委託已經吃掉的股數（從最好的價位開始扣），不能再吃一次。
+ */
+export function walkBook(levels, side, qty, limit, skip = 0) {
   const fills = [];
   let left = qty;
-  for (const [px, vol] of levels || []) {
+  let sk = skip;
+  for (const [px, vol0] of levels || []) {
     if (left <= 0) break;
-    if (!(px > 0) || !(vol > 0)) continue;
+    if (!(px > 0) || !(vol0 > 0)) continue;
     if (limit != null && (side === 'B' ? px > limit + 1e-9 : px < limit - 1e-9)) break;
+    let vol = vol0;
+    if (sk > 0) { const k = Math.min(sk, vol); vol -= k; sk -= k; }
+    if (!(vol > 0)) continue;
     const n = Math.min(left, vol);
     fills.push({ px, qty: n });
     left -= n;
   }
   return { fills, filled: qty - left };
+}
+
+/**
+ * 你自己的委託不能重複吃同一批量：同一筆快照、同一邊的五檔，盤中市價單用的成交量，盤後定價對手方剩下的量，
+ * 先到先得（照委託時間），後面的委託只拿得到剩下的。從已經存下來的成交算起，所以分幾次算、在哪個分頁算都一樣。
+ */
+export function makeLiquidity(fills) {
+  const used = new Map();
+  const key = (code, kind, t, side, what) => `${code}|${kind}|${t}|${side}|${what}`;
+  const add = (k, n) => { if (n > 0) used.set(k, (used.get(k) || 0) + n); };
+  for (const f of fills || []) {
+    const kind = f.sess === 'odd' ? 'odd' : 'reg';
+    if (f.how === 'arrive' || f.how === 'book') add(key(f.code, kind, f.t, f.side, 'book'), f.qty);
+    else if (f.how === 'rest') { add(key(f.code, kind, f.t, f.side, 'book'), f.qty); add(key(f.code, kind, f.t, f.side, 'dv'), f.qty); }
+    else if (f.how === 'fix') add(key(f.code, 'fix', f.d, f.side, 'left'), f.qty);
+  }
+  return {
+    get: (code, kind, t, side, what) => used.get(key(code, kind, t, side, what)) || 0,
+    take: (n, code, kind, t, side, what) => add(key(code, kind, t, side, what), n),
+  };
 }
 
 // 零股撮合以「股」為單位；整股要整張。可成交量取整張。
@@ -105,9 +132,10 @@ export function startOf(o) {
  *   act：開始撮合的時間；L／H：開始撮合時的當日最低／最高（之後創新低／新高才算穿價）
  *   cut：已經處理到哪一筆快照（資料時間）；filled：已成交股數（一律從存下來的成交算，呼叫端傳進來）
  *   v：上一筆快照的累計成交量；zp：上一筆的成交價（市價單剩下的部分用）
+ * liq：同一局其他委託已經吃掉的量（makeLiquidity）；只算單一筆委託時可以不給。
  * 回傳 { prog, fills: [{t, px, qty, how}], done: {st, why, t} | null }
  */
-export function advance(o, prog0, mods, mkt, nowMs) {
+export function advance(o, prog0, mods, mkt, nowMs, liq = null) {
   const prog = { st: 'wait', act: null, L: null, H: null, zt0: null, cut: 0, filled: 0, ...normProg(prog0) };
   const out = { prog, fills: [], done: null };
   if (prog.st === 'done') return out;
@@ -156,12 +184,14 @@ export function advance(o, prog0, mods, mkt, nowMs) {
     if (af === undefined) return out;                  // 等證交所公布盤後結果
     const C = day.c;
     if (!isNum(C)) {
-      if (af === null || final()) finish('expired', '這天沒有收盤價（整天沒有成交），盤後定價不成交', t);
+      // 收盤價確定沒有（整天沒成交）才失效；還不知道（資料還沒到）就等
+      if (af === null || (C === null && final())) finish('expired', '這天沒有收盤價（整天沒有成交），盤後定價不成交', t);
       return out;
     }
-    const left = af ? Math.max(0, (isB ? af[4] : af[3]) || 0) : 0;
+    const used = liq ? liq.get(o.code, 'fix', D, o.side, 'left') : 0;
+    const left = af ? Math.max(0, ((isB ? af[4] : af[3]) || 0) - used) : 0;
     const n = roundLot(Math.min(q, left), 'fix');
-    if (n > 0) fill(t, C, n, 'fix');
+    if (n > 0) { fill(t, C, n, 'fix'); if (liq) liq.take(n, o.code, 'fix', D, o.side, 'left'); }
     if (n >= q) finish('filled', '', t);
     else {
       finish('expired', n > 0 ? `盤後定價對手方剩下的委託只有 ${n} 股，其餘未成交`
@@ -218,6 +248,9 @@ export function advance(o, prog0, mods, mkt, nowMs) {
     return isB ? Math.max(...xs) : Math.min(...xs);
   };
 
+  // 盤中委託（整股、盤中零股）最晚 13:30 收盤前送到；收盤後才送出的不會進到交易所（App 也不讓你送）
+  if (prog.st === 'wait' && o.at >= closeAt) { finish('rejected', '13:30 收盤以後才送出的盤中委託，交易所不收', o.at); return out; }
+
   // 1) 開始撮合
   if (prog.st === 'wait') {
     if (o.at < firstMatch) {
@@ -242,7 +275,11 @@ export function advance(o, prog0, mods, mkt, nowMs) {
         Object.assign(prog, { st: 'live', act: firstMatch, L: O, H: O, zt0: firstMatch, cut: firstMatch, v: null, zp: O });
       }
     } else if (o.at >= auctionAt) {
-      // 收盤前集合競價時段才送出：只參加 13:30 收盤撮合
+      // 收盤前集合競價時段才送出：只參加 13:30 收盤撮合（這個時段只收限價 ROD，App 送單時就會擋下其他的）
+      if (o.type !== 'L' || o.tif === 'IOC' || o.tif === 'FOK') {
+        finish('rejected', `收盤前集合競價時段不接受${o.type !== 'L' ? '市價單' : ` ${o.tif}`}，交易所退單`, o.at);
+        return out;
+      }
       if (!bandOk(o.at)) return out;
       closeOnly(o.at);
     } else {
@@ -259,6 +296,12 @@ export function advance(o, prog0, mods, mkt, nowMs) {
         if (kind === 'odd' && !ticksAll.length) { finish('expired', '這一天沒有盤中零股的行情資料，沒辦法判斷，委託失效', o.at); return out; }
         if (!bandOk(o.at)) return out;
         closeOnly(o.at);
+        // 送出之後、收盤前集合競價之前，其實有人用比你的委託價更好的價格成交了（下一筆快照的最後成交）：
+        // 真實世界你的單在盤中就成交了；那之前送的刪單、減量來不及（成交在先）
+        if (t1 && limitP != null && isNum(t1.z) && isNum(t1.zt) && t1.zt > o.at && t1.zt < auctionAt && better(t1.z)) {
+          const q = remain(o.at + 1);
+          if (q > 0) fill(t1.t, limitP, q, 'through');
+        }
       } else {
         if (!bandOk(t1.t)) return out;
         // 委託送出就到了交易所；在下一筆快照之前送的刪單、減量，如果那筆快照顯示已經能成交，一律算「成交在先」
@@ -268,7 +311,7 @@ export function advance(o, prog0, mods, mkt, nowMs) {
         const noBook = !(t1.a && t1.a.length) && !(t1.b && t1.b.length);
         let got = { fills: [], filled: 0 };
         if (book && book.length) {
-          got = walkBook(book, o.side, q, effP);
+          got = walkBook(book, o.side, q, effP, liq ? liq.get(o.code, kind, t1.t, o.side, 'book') : 0);
           if (!marketable) got.fills = got.fills.map((f) => ({ ...f, px: limitP }));
         } else if (noBook && limitP != null && isNum(t1.z) && isNum(t1.zt) && t1.zt > o.at && better(t1.z)) {
           // 這一筆完全沒有五檔資料（資料缺漏）：委託之後有人用比你更好的價格成交，才算成交
@@ -281,7 +324,7 @@ export function advance(o, prog0, mods, mkt, nowMs) {
         let lastPx = null;
         for (const f of got.fills) {
           const k = Math.min(left, f.qty);
-          if (k > 0) { fill(t1.t, f.px, k, 'arrive'); lastPx = f.px; }
+          if (k > 0) { fill(t1.t, f.px, k, 'arrive'); lastPx = f.px; if (liq) liq.take(k, o.code, kind, t1.t, o.side, 'book'); }
           left -= k;
         }
         if (o.tif === 'IOC' || o.tif === 'FOK') {
@@ -301,11 +344,14 @@ export function advance(o, prog0, mods, mkt, nowMs) {
 
   // 2) 掛著：每一筆新快照看價格有沒有「穿過」你的委託價（剛好碰到不算）
   if (prog.st === 'live') {
+    // 已經全部成交（例如送出就整筆吃到）：不用再等之後的行情
+    if (prog.full) { finish('filled', '', out.fills.length ? out.fills[out.fills.length - 1].t : prog.cut); return out; }
     let ticks = ticksAll;
     // 那天的行情已經結束、但最後一段沒有快照（後台斷線）：用官方日 K 的最高最低補一筆，只拿來判斷有沒有穿價
-    const off = kind === 'reg' && final() ? mkt.official && mkt.official(o.code, D) : null;
+    const off = kind === 'reg' && final() && mkt.official ? mkt.official(o.code, D) : null;
     const lastT = ticks.length ? ticks[ticks.length - 1].t : -Infinity;
-    if (off && isNum(off.h) && isNum(off.l) && lastT < auctionAt - 1) ticks = [...ticks, { t: auctionAt - 1, z: null, zt: null, h: off.h, l: off.l, v: null, a: [], b: [], syn: true }];
+    const gap = lastT < auctionAt - 1 && !prog.co;      // 快照少了最後一段
+    if (off && isNum(off.h) && isNum(off.l) && gap) ticks = [...ticks, { t: auctionAt - 1, z: null, zt: null, h: off.h, l: off.l, v: null, a: [], b: [], syn: true }];
     for (const x of ticks) {
       if (!(x.t > prog.cut)) continue;
       if (x.t >= closeAt) break;                 // 收盤後的快照交給收盤撮合
@@ -318,21 +364,25 @@ export function advance(o, prog0, mods, mkt, nowMs) {
       if (limitP == null) {
         // 市價單剩下的部分：排在所有限價單前面，之後有人賣（買）就先跟它成交；價格用證交所的「轉換參考價」
         if (x.t < auctionAt && !x.syn) {
-          const got = book && book.length ? walkBook(book, o.side, q, effP) : { fills: [], filled: 0 };
-          const dv = isNum(x.v) && isNum(prog.v) ? Math.max(0, x.v - prog.v) : 0;
+          const got = book && book.length ? walkBook(book, o.side, q, effP, liq ? liq.get(o.code, kind, x.t, o.side, 'book') : 0) : { fills: [], filled: 0 };
+          const dv = isNum(x.v) && isNum(prog.v) ? Math.max(0, x.v - prog.v - (liq ? liq.get(o.code, kind, x.t, o.side, 'dv') : 0)) : 0;
           const n = roundLot(Math.min(q, got.filled + dv), o.sess);
           const px = mktPx([prog.zp, x.z, got.fills.length ? got.fills[got.fills.length - 1].px : null]);
-          if (n > 0 && isNum(px) && (effP == null || (isB ? px <= effP + 1e-9 : px >= effP - 1e-9))) { fill(x.t, px, n, 'rest'); px0 = px; }
+          if (n > 0 && isNum(px) && (effP == null || (isB ? px <= effP + 1e-9 : px >= effP - 1e-9))) {
+            fill(x.t, px, n, 'rest');
+            px0 = px;
+            if (liq) { const b = Math.min(n, got.filled); liq.take(b, o.code, kind, x.t, o.side, 'book'); liq.take(n - b, o.code, kind, x.t, o.side, 'dv'); }
+          }
         }
       } else {
         const through = (isNum(x.z) && isNum(x.zt) && x.zt > prog.zt0 && better(x.z))
           || (isB ? isNum(x.l) && x.l < prog.L - 1e-9 && better(x.l) : isNum(x.h) && x.h > prog.H + 1e-9 && better(x.h));
         if (through) fill(x.t, limitP, q, 'through');
         else if (book && book.length) {
-          // 對方掛的價格比你的委託價還好：真實世界你的單早就成交了（用你的價格，量看對方掛多少）
-          const got = walkBook(book, o.side, q, limitP);
+          // 對方掛的價格比你的委託價還好：真實世界你的單早就成交了（用你的價格，量看對方掛多少，扣掉你自己別的單已經吃掉的）
+          const got = walkBook(book, o.side, q, limitP, liq ? liq.get(o.code, kind, x.t, o.side, 'book') : 0);
           const n = roundLot(got.filled, o.sess);
-          if (n > 0) fill(x.t, limitP, n, 'book');
+          if (n > 0) { fill(x.t, limitP, n, 'book'); if (liq) liq.take(n, o.code, kind, x.t, o.side, 'book'); }
         }
       }
       if (isNum(x.v)) prog.v = x.v;
@@ -351,6 +401,7 @@ export function advance(o, prog0, mods, mkt, nowMs) {
         const nx = ticks.find((x) => x.t > m.at);       // 刪單之後的下一筆（一定是收盤後的那一筆，不然上面就處理掉了）
         const offd = !nx && final() ? (kind === 'reg' && mkt.official ? mkt.official(o.code, D) : null) : null;
         if (!nx && !final()) return out;                // 等下一筆行情
+        if (!nx && offd === undefined) return out;      // 官方日 K 還沒拿到：等（不能沒看證據就讓刪單成立）
         const ev = nx || (offd ? { h: offd.h, l: offd.l, v: null } : null);
         const q = remain(prog.cut + 1);
         if (ev && q > 0) {
@@ -376,6 +427,8 @@ export function advance(o, prog0, mods, mkt, nowMs) {
 
     // 3) 收盤撮合（13:30）：13:30 真的有撮合成交，而且成交價比你的委託價好，才用那個價格成交；其餘收盤後失效
     if (nowMs < closeAt) return out;
+    // 快照少了最後一段、官方日 K 又還沒拿到：等（那一段可能已經穿價，不能少看那一段就用收盤結果下結論）
+    if (off === undefined && gap) return out;
     const ca = mkt.closeAuction(o.code, D, kind);
     if (!ca || !ca.known) return out;              // 收盤結果還沒出來：等資料，不看時鐘
     const C = ca.px;
@@ -419,14 +472,16 @@ export function processRun(run, mkt, nowMs) {
     if (!fillsBy.has(f.oid)) fillsBy.set(f.oid, []);
     fillsBy.get(f.oid).push(f);
   }
-  const open = (run.orders || []).filter((o) => !finals[o.id]);
+  // 照委託時間排：同一筆快照的量先到先得
+  const open = (run.orders || []).filter((o) => !finals[o.id]).sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1));
   const shares = open.some((o) => o.side === 'S') ? sharesNow(run, mkt, nowMs) : null;
+  const liq = makeLiquidity(run.fills || []);
   for (const o of open) {
     const before = fillsBy.get(o.id) || [];
     const filled0 = before.reduce((s, f) => s + f.qty, 0);
     const p0 = heal({ ...(prog[o.id] || {}), filled: filled0 }, before, o, mkt);
     if (p0.full && filled0 < qtyAt(o, run.mods || [], Infinity).q) delete p0.full;
-    const r = advance(o, p0, run.mods || [], mkt, nowMs);
+    const r = advance(o, p0, run.mods || [], mkt, nowMs, liq);
     let cum = before.reduce((s, f) => s + f.amt, 0);
     let feeC = before.reduce((s, f) => s + f.fee, 0);
     let feeF = before.reduce((s, f) => s + (f.fin ?? f.fee), 0);
@@ -535,6 +590,12 @@ export function orderStatus(run, o) {
 /** 已經「確定生效」的刪單、減量：送出之後有一筆行情確認過（或那筆委託還沒開始撮合） */
 export function confirmedMods(run, o, asOf = Infinity) {
   const p = normProg((run.prog || {})[o.id]);
+  // 只參加收盤撮合的單（prog.co）：13:30 以前送的刪單、減量馬上生效；13:30 以後才送的來不及（收盤已經撮合），
+  // 圈存照樣圈著，等收盤結果
+  if (p && p.st === 'live' && p.co) {
+    const closeAt = atTW(o.day, windows(o.day).regClose);
+    return (run.mods || []).filter((m) => m.oid === o.id && m.at <= asOf && m.at < closeAt);
+  }
   const cut = p && p.st === 'live' ? p.cut : -Infinity;
   const start = startOf(o);
   return (run.mods || []).filter((m) => m.oid === o.id && m.at <= asOf && (m.at <= cut || (o.at < start && m.at < start && (!p || p.st === 'wait'))));

@@ -239,9 +239,13 @@ async function settle(quiet = false) {
   const late = R.tw(t0).hm >= 1330;
   // 每一筆還沒結束的委託「那一天」的逐輪快照（今天、前一個交易日在 tape/，更早的從封存抓）、官方日 K、盤後結果
   await Promise.all(open.map((o) => D.ensureTapeDay(o.code, o.day)));
-  await Promise.all([...new Set(open.filter((o) => o.day < today || late).map((o) => o.code))].map((c) => D.ensureK(c)));
+  // 官方日 K：給最晚那一天，日 K 還沒更新到那一天（官方收盤資料已經出來）就重新抓
+  const kDay = new Map();
+  for (const o of open) if (o.day < today || late) kDay.set(o.code, Math.max(kDay.get(o.code) || 0, o.day));
+  await Promise.all([...kDay].map(([c, d]) => D.ensureK(c, d)));
   await Promise.all([...new Set(open.filter((o) => o.sess === 'fix' || o.sess === 'oddpm').map((o) => o.day))].map((d) => D.ensureAfterDay(d)));
-  if ((r.plans || []).length) await Promise.all([...new Set(r.plans.map((p) => p.c))].map((c) => Promise.all([D.ensureHist(c), D.ensureK(c)])));
+  const asof = D.S.summary ? D.S.summary.asof : null;
+  if ((r.plans || []).length) await Promise.all([...new Set(r.plans.map((p) => p.c))].map((c) => Promise.all([D.ensureHist(c, asof), D.ensureK(c, asof)])));
   let changed = false;
   let before = null;
   await ST.withLock(() => {
@@ -868,7 +872,9 @@ function renderOrders() {
     const avg = q ? fs.reduce((a, f) => a + f.amt, 0) / q : null;
     const nm = (D.row(o.code) || {}).n || '';
     const live = ['wait', 'queued', 'live', 'part', 'cancelling'].includes(s.st);
-    const canPx = live && o.sess === 'reg' && o.type === 'L' && o.tif === 'ROD';
+    // 那個時段撮合完以後（整股、零股 13:30；盤後 14:30）不能再刪改單，按鈕收起來
+    const modOk = now() < R.atTW(o.day, o.sess === 'fix' || o.sess === 'oddpm' ? 1430 : 1330);
+    const canPx = live && modOk && o.sess === 'reg' && o.type === 'L' && o.tif === 'ROD';
     const why = (r.finals[o.id] || {}).why;
     const nt = (r.notes || {})[o.id];
     return `<div class="slip" data-oid="${o.id}"><span class="stamp ${s.st}">${E.ST_NAME[s.st]}</span>
@@ -878,7 +884,8 @@ function renderOrders() {
       ${why ? `<div class="why">${esc(why)}</div>` : ''}
       ${nt && nt.t ? `<div class="m">理由：${esc(nt.t)}</div>` : ''}
       ${s.st === 'cancelling' ? '<div class="m">刪單已送出，等下一筆行情確認（如果那之前已經成交，成交算數）</div>' : ''}
-      ${live && s.st !== 'cancelling' ? `<div class="acts"><button class="btn sm" data-act="cancel">刪單</button>${o.qty - q > (o.sess === 'reg' ? 1000 : 1) ? '<button class="btn sm" data-act="reduce">減量</button>' : ''}${canPx ? '<button class="btn sm" data-act="reprice">改價</button>' : ''}</div>` : ''}
+      ${live && !modOk && s.st !== 'cancelling' ? '<div class="m">已經撮合，等交易所的結果（不能再刪改單）</div>' : ''}
+      ${live && modOk && s.st !== 'cancelling' ? `<div class="acts"><button class="btn sm" data-act="cancel">刪單</button>${o.qty - q > (o.sess === 'reg' ? 1000 : 1) ? '<button class="btn sm" data-act="reduce">減量</button>' : ''}${canPx ? '<button class="btn sm" data-act="reprice">改價</button>' : ''}</div>` : ''}
     </div>`;
   };
   el.innerHTML = `
@@ -917,6 +924,9 @@ async function modOrder(o, kind, qty) {
   const s = E.orderStatus(r, r.orders.find((x) => x.id === o.id));
   if (s.st === 'cancelling') { note('這筆已經送出刪單，正在等下一筆行情確認'); return false; }
   if (!['wait', 'queued', 'live', 'part'].includes(s.st)) { note(`來不及了：這筆已經「${E.ST_NAME[s.st]}」`); renderAll(); return false; }
+  // 那個時段已經撮合完（整股、盤中零股 13:30；盤後 14:30）：交易所不收刪改單，等撮合結果
+  const endHM = o.sess === 'fix' || o.sess === 'oddpm' ? 1430 : 1330;
+  if (at >= R.atTW(o.day, endHM)) { note(`來不及了：${MD(o.day)} ${String(endHM).replace(/(\d\d)$/, ':$1')} 已經撮合，交易所不收刪改單，等撮合結果`); fx('reject'); renderAll(); return false; }
   const m = { id: ST.newId('m', at), oid: o.id, at, kind, qty: qty || 0 };
   db = ST.update((x) => { x.runs[r.id].mods.push(m); });
   fx(kind === 'cancel' ? 'cancel' : 'stamp');
@@ -1289,17 +1299,30 @@ function importDialog() {
   });
 }
 async function endDialog() {
+  if (!run()) return;
+  // 封存不能拿來躲成交：還沒結束的委託要先刪單、等交易所確認（如果那之前已經成交，成交算數），或等撮合結果
+  if (!D.serverOk()) { note('連上網路才能封存：要先用最新的行情把還沒結束的委託算完'); fx('reject'); return; }
+  await settle(true);
   const r = run();
-  if (!r) return;
-  const open = r.orders.filter((o) => ['wait', 'queued', 'live', 'part', 'cancelling'].includes(E.orderStatus(r, o).st)).length;
-  const ok = await confirmBox('封存這一局？', `<p>${esc(r.name)} 會結算目前的總資產、和 0050 的比較，永遠留在戰役紀錄裡（不能刪、不能再交易）。${open ? `<br><b class="warn">還有 ${open} 筆委託掛著，會一起作廢。</b>` : ''}</p><p>之後可以馬上開新的一局，從那一刻的真實行情開始。</p>`, '封存', true);
+  const open = r.orders.filter((o) => ['wait', 'queued', 'live', 'part', 'cancelling'].includes(E.orderStatus(r, o).st));
+  if (open.length) {
+    // 那個時段已經撮合完的（整股、盤中零股 13:30；盤後 14:30）不能再刪，只能等結果
+    const can = open.filter((o) => ['wait', 'queued', 'live', 'part'].includes(E.orderStatus(r, o).st) && now() < R.atTW(o.day, o.sess === 'fix' || o.sess === 'oddpm' ? 1430 : 1330));
+    const go = await confirmBox('還有委託沒有結束', `<p>還有 ${open.length} 筆委託沒有結束，封存之前要先讓它們結束：刪單要等下一筆行情確認（如果那之前價格已經穿過你的委託價，成交算數），已經撮合的要等結果出來。</p>${can.length ? `<p>要現在把 ${can.length} 筆全部送出刪單嗎？確認之後再回來封存。</p>` : '<p>剩下的都在等確認或撮合結果，稍後再回來封存。</p>'}`, can.length ? '全部刪單' : '知道了', !!can.length);
+    if (go && can.length) for (const o of can) await modOrder(o, 'cancel');
+    return;
+  }
+  const ok = await confirmBox('封存這一局？', `<p>${esc(r.name)} 會結算目前的總資產、和 0050 的比較，永遠留在戰役紀錄裡（不能刪、不能再交易）。</p><p>之後可以馬上開新的一局，從那一刻的真實行情開始。</p>`, '封存', true);
   if (!ok) return;
   await renderReport();
   const rep = UI.reportCache ? UI.reportCache.rep : null;
   const Lg = L(r);
+  let ended = false;
   db = ST.update((x) => {
-    ST.endRun(x, r.id, { at: now(), d: R.tw(now()).d, equity: Lg.equity, ret: Lg.equity / r.capital - 1, bench: rep ? rep.bench : null, fills: r.fills.length, mdd: rep ? rep.mdd : null });
+    ended = ST.endRun(x, r.id, { at: now(), d: R.tw(now()).d, equity: Lg.equity, ret: Lg.equity / r.capital - 1, bench: rep ? rep.bench : null, fills: r.fills.length, mdd: rep ? rep.mdd : null });
   });
+  // 剛好另一個分頁又送了一筆委託：先不封存
+  if (!ended) { note('還有委託沒有結束，這一局先不封存'); fx('reject'); renderAll(); return; }
   fx('stamp');
   renderAll();
   updateTable(false);

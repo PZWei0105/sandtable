@@ -77,13 +77,79 @@ await test('C2 那天結束了沒：後台標完成、換日、或官方收盤�
   assert.equal(Dm.mkt().final('0050', D), true, '前一天（prev）一定結束了');
   S.tape.set('0050', { c: '0050', cur: { d: D }, prev: null });
   S.summary.asof = D;
-  assert.equal(Dm.mkt().final('0050', D), true, '官方收盤資料出來了');
+  assert.equal(Dm.mkt().final('0050', D), false, '有那一天的 tape、後台還沒標結束：等（手上的 tape 可能是舊的）');
+  S.tape.set('0050', { c: '0050', cur: { d: 20261021 }, prev: null });
+  assert.equal(Dm.mkt().final('0050', D), true, '確定沒有那一天的 tape（後台那天沒跑）：官方收盤資料出來就算結束');
+  S.tape.set('0050', { c: '0050', cur: null, prev: null, unk: true });
+  assert.equal(Dm.mkt().final('0050', D), false, 'tape 沒抓到（或只有離線的舊資料）：等');
+});
+await test('N1 封存抓不到（被擋、連不上、429）≠ 確定沒有：撮合等，不會改用官方日 K', () => {
+  reset();
+  S.summary = { asof: 20261027, etfs: [] };
+  S.tape.set('0050', { c: '0050', cur: { d: 20261027 }, prev: { d: 20261023 } });
+  const m = () => Dm.mkt();
+  assert.equal(m().final('0050', D), false, '封存還沒讀到：不能下結論');
+  assert.deepEqual(m().closeAuction('0050', D, 'reg'), { known: false, px: null });
+  S.arc.set(`${D}/0050`, null);            // 404：封存確定沒有
+  assert.equal(m().final('0050', D), true);
+  assert.equal(m().official('0050', D), undefined, '日 K 還沒抓到：不知道');
+  assert.deepEqual(m().closeAuction('0050', D, 'reg'), { known: false, px: null }, '收盤價還不知道：等');
+  S.k.set('0050', { d: [20261021, D, 20261023], o: [1, 2, 3], h: [1, 2, 3], l: [1, 2, 3], c_: [1, 2.5, 3], v: [1, 1, 1] });
+  assert.equal(m().official('0050', D).c, 2.5);
+  assert.deepEqual(m().closeAuction('0050', D, 'reg'), { known: true, px: 2.5 });
+});
+await test('N1 抓 tape、日 K、歷史檔失敗或拿到離線舊資料：記成還不知道，下次再抓', async () => {
+  reset();
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+    await Dm.loadTape('0050');
+    assert.equal(S.tape.get('0050').unk, true);
+    await Dm.ensureK('0050');
+    await Dm.ensureHist('0050');
+    assert.equal(S.k.has('0050'), false, '日 K 抓失敗不記');
+    assert.equal(S.hist.has('0050'), false, '歷史檔抓失敗不記');
+    globalThis.fetch = async () => new Response(JSON.stringify({ c: '0050', cur: { d: D }, prev: null }), { status: 200, headers: { 'X-Sandtable-Offline': '1' } });
+    await Dm.loadTape('0050');
+    assert.equal(S.tape.get('0050').unk, true, '離線的舊 tape 不拿來撮合');
+    globalThis.fetch = async () => new Response(JSON.stringify({ c: '0050', cur: { d: D }, prev: null }), { status: 200 });
+    await Dm.ensureTape('0050');
+    assert.equal(S.tape.get('0050').unk, undefined, '連上了就換成新鮮的');
+    globalThis.fetch = async () => new Response('nf', { status: 404 });
+    await Dm.ensureK('0050');
+    assert.equal(S.k.get('0050'), null, '404 才記成確定沒有');
+  } finally { globalThis.fetch = realFetch; }
+});
+await test('日 K 還沒更新到官方資料的那一天：重新抓（換日馬上抓一次，之後最多每 5 分鐘一次），不會永遠等', async () => {
+  reset();
+  const realFetch = globalThis.fetch;
+  let n = 0;
+  const K = (days) => ({ c: '0050', d: days, o: days.map(() => 100), h: days.map(() => 101), l: days.map(() => 99), c_: days.map(() => 100.5), v: days.map(() => 1), div: [] });
+  try {
+    globalThis.fetch = async () => { n++; return new Response(JSON.stringify(K([20261020, 20261021])), { status: 200 }); };
+    await Dm.ensureK('0050', D);
+    assert.equal(n, 1);
+    assert.equal(Dm.mkt().official('0050', D), undefined, '官方收盤資料還沒到 D');
+    S.summary = { asof: D, etfs: [] };
+    await Dm.ensureK('0050', D);
+    assert.equal(n, 2, '官方資料換日了、日 K 還停在前一天：重新抓');
+    await Dm.ensureK('0050', D);
+    assert.equal(n, 2, '剛抓過：5 分鐘內不再抓');
+    assert.equal(Dm.mkt().official('0050', D), undefined, '還沒更新到 D：等');
+    S.summary = { asof: 20261023, etfs: [] };
+    globalThis.fetch = async () => { n++; return new Response(JSON.stringify(K([20261020, 20261021, D, 20261023])), { status: 200 }); };
+    await Dm.ensureK('0050', D);
+    assert.equal(n, 3);
+    assert.deepEqual(Dm.mkt().official('0050', D), { o: 100, h: 101, l: 99, c: 100.5, v: 1 });
+    await Dm.ensureK('0050', D);
+    assert.equal(n, 3, '已經涵蓋到 D：不再抓');
+  } finally { globalThis.fetch = realFetch; }
 });
 await test('C2 收盤撮合：那天結束了、卻沒有收盤後的快照（後台斷線）→ 整股用官方收盤價，零股沒有', () => {
   reset();
   S.summary = { asof: D, etfs: [] };
   S.rows.set('0050', { c: '0050', m: 'tse', k: 'broad', d: D, p: 100.4 });
-  S.tape.set('0050', { c: '0050', cur: { d: D, reg: series([{ t: sec(1100), q: sec(1059) }]), odd: series([{ t: sec(1100), q: sec(1059) }]) }, prev: null });
+  S.tape.set('0050', { c: '0050', cur: { d: D, done: true, reg: series([{ t: sec(1100), q: sec(1059) }]), odd: series([{ t: sec(1100), q: sec(1059) }]) }, prev: null });
   assert.deepEqual(Dm.mkt().closeAuction('0050', D, 'reg'), { known: true, px: 100.4 });
   assert.deepEqual(Dm.mkt().closeAuction('0050', D, 'odd'), { known: true, px: null });
 });
@@ -121,7 +187,7 @@ await test('定期定額用的收盤價：資料還沒到是 undefined、確定�
   const m = () => Dm.mkt();
   assert.equal(m().close('0050', D), undefined, '官方收盤資料還停在前一天');
   S.summary.asof = D;
-  assert.equal(m().close('0050', D), null, '收盤資料出來了，這檔那天沒有成交');
+  assert.equal(m().close('0050', D), null, '收盤資料出來了，這檔最後一次成交在那天之前：那天沒有成交');
   S.rows.set('0050', { c: '0050', m: 'tse', k: 'broad', d: D, p: 108.4 });
   assert.equal(m().close('0050', D), 108.4);
   S.rows.set('0050', { c: '0050', m: 'tse', k: 'broad', d: 20261023, p: 109 });
@@ -129,6 +195,10 @@ await test('定期定額用的收盤價：資料還沒到是 undefined、確定�
   assert.equal(m().close('0050', D), undefined, '日 K、歷史檔還沒載入：等');
   S.k.set('0050', { d: [D], o: [108], h: [109], l: [108], c_: [108.4], v: [1] });
   assert.equal(m().close('0050', D), 108.4);
+  S.k.set('0050', { d: [20261021, 20261023], o: [1, 1], h: [1, 1], l: [1, 1], c_: [1, 1], v: [1, 1] });
+  assert.equal(m().close('0050', D), null, '日 K 涵蓋那幾天、就是沒有那一天：停止交易');
+  S.k.set('0050', { d: [20261020, 20261021], o: [1, 1], h: [1, 1], l: [1, 1], c_: [1, 1], v: [1, 1] });
+  assert.equal(m().close('0050', D), undefined, 'N2 日 K 還沒更新到那一天：等，不能當成沒成交');
 });
 await test('走勢線：今天的盤中走勢（spark.json）＋最新價，參考價是昨收；不是今天的就用最近 40 天收盤', () => {
   reset();
