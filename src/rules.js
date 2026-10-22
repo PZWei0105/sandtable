@@ -40,6 +40,7 @@ export function daysBetween(a, b) {
 export function makeCal(raw = {}) {
   return {
     holidays: new Set(raw.holidays || []),
+    settleOnly: new Set(raw.settle_only || []),   // 不交易、但照常辦理交割的日子（例如春節前）
     open: new Set(raw.open || []),
     closed: new Set(raw.closed || []),
   };
@@ -60,10 +61,19 @@ export function prevTradingDay(cal, d) {
   for (let i = 0; i < 40 && !isTradingDay(cal, x); i++) x = addDays(x, -1);
   return x;
 }
-/** d 之後第 n 個交易日（d 本身不算）。T+2 交割＝addTradingDays(成交日, 2) */
+/** d 之後第 n 個交易日（d 本身不算） */
 export function addTradingDays(cal, d, n) {
   let x = d;
   for (let i = 0; i < n; i++) x = nextTradingDay(cal, x);
+  return x;
+}
+/** 交割日：成交日之後第 2 個「營業日」（只辦交割、不交易的日子也算） */
+export function settleDay(cal, d, n = 2) {
+  let x = d;
+  for (let i = 0; i < n; i++) {
+    x = addDays(x, 1);
+    for (let k = 0; k < 40 && !(isTradingDay(cal, x) || (cal.settleOnly && cal.settleOnly.has(x))); k++) x = addDays(x, 1);
+  }
   return x;
 }
 

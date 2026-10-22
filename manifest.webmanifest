@@ -1,0 +1,17 @@
+{
+  "name": "沙盤 SANDTABLE",
+  "short_name": "沙盤",
+  "description": "台股 ETF 真實模擬操盤：真的行情、真的規則、假的錢。",
+  "lang": "zh-Hant-TW",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f120e",
+  "theme_color": "#0f120e",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
