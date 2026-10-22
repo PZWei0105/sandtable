@@ -1,9 +1,10 @@
 /* 沙盤 — 圖表（canvas）：分時走勢、日 K、戰報淨值曲線。全部可以用手指或滑鼠移動看數字。 */
 import { atTW } from './rules.js';
 
+// 和 styles.css 同一組顏色：金＝系統、寶藍＝你自己、紅漲綠跌
 const COL = {
-  ink: '#ece2cc', dim: 'rgba(236,226,204,0.55)', faint: 'rgba(236,226,204,0.12)', grid: 'rgba(205,184,143,0.09)',
-  up: '#ff4a55', down: '#1fbf86', brass: '#d9a441', blue: '#4f86ff', sand: '#cdb88f', bg: '#151a13',
+  ink: '#f4ede2', dim: 'rgba(244,237,226,0.55)', faint: 'rgba(244,237,226,0.12)', grid: 'rgba(242,184,75,0.08)',
+  up: '#ff4b5c', down: '#1fd39a', brass: '#f2b84b', blue: '#5b8cff', sand: '#cbbfaa', grey: '#8b8172', bg: '#09090b',
 };
 const NUM = '600 11px "Barlow Condensed", "Noto Sans TC", sans-serif';
 
@@ -85,7 +86,7 @@ export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs }, tipEl)
       g.fillText(`${hm / 100}:00`, x, h - 8);
     }
     if (ref) {
-      g.setLineDash([4, 4]); g.strokeStyle = 'rgba(236,226,204,0.4)';
+      g.setLineDash([4, 4]); g.strokeStyle = 'rgba(244,237,226,0.4)';
       g.beginPath(); g.moveTo(padL, Y(ref)); g.lineTo(padL + pw, Y(ref)); g.stroke(); g.setLineDash([]);
     }
     for (const [v, c] of [[up, COL.up], [down, COL.down]]) {
@@ -103,7 +104,7 @@ export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs }, tipEl)
     const bw = Math.max(1.5, pw / 66 - 1);
     pts.forEach((x, i) => {
       const vh = (vols[i] / maxV) * volH;
-      g.fillStyle = i && x.z < pts[i - 1].z ? 'rgba(31,191,134,0.55)' : 'rgba(255,74,85,0.55)';
+      g.fillStyle = i && x.z < pts[i - 1].z ? 'rgba(31,211,154,0.55)' : 'rgba(255,75,92,0.55)';
       g.fillRect(X(x.t) - bw / 2, padT + ph + 6 + volH - vh, bw, vh);
     });
     // 價格線＋填色
@@ -113,7 +114,7 @@ export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs }, tipEl)
     pts.forEach((x, i) => (i ? g.lineTo(X(x.t), Y(x.z)) : g.moveTo(X(x.t), Y(x.z))));
     g.strokeStyle = lineC; g.lineWidth = 2; g.lineJoin = 'round'; g.stroke();
     const grd = g.createLinearGradient(0, padT, 0, padT + ph);
-    grd.addColorStop(0, lineC === COL.up ? 'rgba(255,74,85,0.22)' : 'rgba(31,191,134,0.22)');
+    grd.addColorStop(0, lineC === COL.up ? 'rgba(255,75,92,0.22)' : 'rgba(31,211,154,0.22)');
     grd.addColorStop(1, 'rgba(0,0,0,0)');
     g.lineTo(X(last.t), padT + ph); g.lineTo(X(pts[0].t), padT + ph); g.closePath();
     g.fillStyle = grd; g.fill();
@@ -123,7 +124,7 @@ export function drawIntraday(cv, { ticks = [], ref, up, down, d, nowMs }, tipEl)
       let best = pts[0];
       for (const x of pts) if (Math.abs(X(x.t) - hover) < Math.abs(X(best.t) - hover)) best = x;
       const bx = X(best.t);
-      g.strokeStyle = 'rgba(236,226,204,0.5)'; g.lineWidth = 1;
+      g.strokeStyle = 'rgba(244,237,226,0.5)'; g.lineWidth = 1;
       g.beginPath(); g.moveTo(bx, padT); g.lineTo(bx, padT + ph + 6 + volH); g.stroke();
       g.beginPath(); g.arc(bx, Y(best.z), 4, 0, Math.PI * 2); g.fillStyle = COL.ink; g.fill();
       if (tipEl) {
@@ -198,7 +199,7 @@ export function drawK(cv, bars, tipEl) {
       g.fillRect(X(i) - bw / 2, padT + ph + 6 + volH - vh, bw, vh);
       g.globalAlpha = 1;
     });
-    for (const [arr, c] of [[m5, COL.ink], [m20, COL.brass], [m60, COL.blue]]) {
+    for (const [arr, c] of [[m5, COL.ink], [m20, COL.brass], [m60, COL.grey]]) {
       g.beginPath();
       let started = false;
       vis.forEach((_, i) => {
@@ -211,7 +212,7 @@ export function drawK(cv, bars, tipEl) {
     // 圖例
     g.font = NUM; g.textAlign = 'left';
     let lx = padL + 2;
-    for (const [lab, c, arr] of [['MA5', COL.ink, m5], ['MA20', COL.brass, m20], ['MA60', COL.blue, m60]]) {
+    for (const [lab, c, arr] of [['MA5', COL.ink, m5], ['MA20', COL.brass, m20], ['MA60', COL.grey, m60]]) {
       const v = arr[end - 1];
       const t = `${lab} ${fmt(v)}`;
       g.fillStyle = c; g.fillText(t, lx, 7);
@@ -220,7 +221,7 @@ export function drawK(cv, bars, tipEl) {
     if (hover != null) {
       const i = Math.max(0, Math.min(vis.length - 1, Math.floor((hover - padL) / cw)));
       const b = vis[i];
-      g.strokeStyle = 'rgba(236,226,204,0.5)';
+      g.strokeStyle = 'rgba(244,237,226,0.5)';
       g.beginPath(); g.moveTo(X(i), padT); g.lineTo(X(i), padT + ph + 6 + volH); g.stroke();
       if (tipEl) {
         const prev = bars[off + i - 1];
@@ -270,7 +271,7 @@ export function drawNav(cv, { days, ret, bench }, tipEl) {
     const Y = (v) => padT + (1 - (v - lo) / (hi - lo)) * ph;
     g.font = NUM; g.textBaseline = 'middle';
     for (const v of niceTicks(lo, hi, 4)) {
-      g.strokeStyle = Math.abs(v) < 1e-9 ? 'rgba(236,226,204,0.35)' : COL.grid; g.lineWidth = 1;
+      g.strokeStyle = Math.abs(v) < 1e-9 ? 'rgba(244,237,226,0.35)' : COL.grid; g.lineWidth = 1;
       g.beginPath(); g.moveTo(padL, Y(v)); g.lineTo(padL + pw, Y(v)); g.stroke();
       g.fillStyle = v > 0 ? COL.up : v < 0 ? COL.down : COL.dim; g.textAlign = 'left';
       g.fillText(`${(v * 100).toFixed(Math.abs(hi - lo) < 0.02 ? 2 : 1)}%`, padL + pw + 6, Y(v));
@@ -294,7 +295,7 @@ export function drawNav(cv, { days, ret, bench }, tipEl) {
     }
     if (hover != null && days.length) {
       const i = Math.max(0, Math.min(days.length - 1, Math.round(((hover - padL) / pw) * (N - 1))));
-      g.strokeStyle = 'rgba(236,226,204,0.5)';
+      g.strokeStyle = 'rgba(244,237,226,0.5)';
       g.beginPath(); g.moveTo(X(i), padT); g.lineTo(X(i), padT + ph); g.stroke();
       if (tipEl) {
         const d = days[i];

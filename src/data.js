@@ -14,7 +14,7 @@ const LAG_MAX = 10 * 60e3;
 
 export const S = {
   summary: null, rows: new Map(), live: null, quotes: null, calRaw: null, cal: makeCal(), divs: {}, after: {},
-  afterDays: new Map(), news: null, version: null, offline: false, lastOk: 0,
+  afterDays: new Map(), spark: null, news: null, version: null, offline: false, lastOk: 0,
   tape: new Map(), arc: new Map(), k: new Map(), hist: new Map(), detail: new Map(),
   closedToday: new Set(), err: null,
 };
@@ -66,6 +66,7 @@ export async function boot() {
     get('after.json').then((x) => { S.after = x || {}; }).catch(() => {}),
     get('news.json').then((x) => { S.news = x; }).catch(() => {}),
     get('version.json').then((x) => { S.version = x; }).catch(() => {}),
+    get('spark.json', { tolerate404: true }).then((x) => { S.spark = x; }).catch(() => {}),
   ];
   await Promise.all(jobs);
   rebuildCal();
@@ -83,6 +84,7 @@ export async function refresh(force = false, tapeCodes = null) {
     get('live.json').then((x) => { S.live = x; }).catch(() => {}),
     get('quotes.json').then((x) => { S.quotes = x; }).catch(() => {}),
     get('news.json').then((x) => { S.news = x; }).catch(() => {}),
+    get('spark.json', { tolerate404: true }).then((x) => { if (x) S.spark = x; }).catch(() => {}),
   ];
   const { hm } = tw(now);
   if (!S.summary || hm >= 1400 || hm < 900) jobs.push(get('summary.json').then(indexSummary).catch(() => {}));
@@ -235,6 +237,43 @@ export function changeOf(code) {
   if (!(px > 0) || !(ref > 0)) return { px, ref, ch: null, pct: null };
   return { px, ref, ch: px - ref, pct: (px / ref - 1) * 100 };
 }
+/**
+ * 走勢線用的點：今天的盤中走勢（spark.json，[分鐘, 價]），還沒有就用最近 40 天的收盤（summary 的 sp）。
+ * 回傳 { pts: [[x, 價]], ref: 參考價, intra: 是不是今天的盤中 }
+ */
+export function sparkOf(code) {
+  const sp = S.spark;
+  const r = row(code);
+  const qd = quotesDay();
+  if (sp && sp.s && sp.s[code] && (!qd || sp.d === qd)) {
+    const a = sp.s[code];
+    const pts = [];
+    for (let i = 0; i + 1 < a.length; i += 2) pts.push([a[i], a[i + 1]]);
+    const last = lastPx(code);
+    if (pts.length && last > 0 && pts[pts.length - 1][1] !== last) pts.push([Math.max(pts[pts.length - 1][0] + 1, 0), last]);
+    return { pts, ref: refPx(code), intra: true, x0: 0, x1: 270 };
+  }
+  if (r && Array.isArray(r.sp) && r.sp.length > 1) {
+    return { pts: r.sp.map((p, i) => [i, p]), ref: null, intra: false, x0: 0, x1: r.sp.length - 1 };
+  }
+  return { pts: [], ref: null, intra: false, x0: 0, x1: 1 };
+}
+/** 今天的成交值（元）：官方收盤資料出來了就用官方的；盤中用最新快照的累計量×現價估（valueEst 會說是估的） */
+export function valueOf(code) {
+  const q = quoteOf(code);
+  const r = row(code);
+  if (q && q.d && (!r || q.d > r.d) && q.v > 0) {
+    const px = q.z > 0 ? q.z : lastPx(code);
+    if (px > 0) return q.v * px;
+  }
+  return r && r.val ? r.val : 0;
+}
+export function valueEst(code) {
+  const q = quoteOf(code);
+  const r = row(code);
+  return !!(q && q.d && (!r || q.d > r.d) && q.v > 0);
+}
+
 /** 這一檔有沒有漲跌幅限制（國外成分的 ETF 沒有；沒有的不能下市價單） */
 export function hasLimits(code) {
   const q = quoteOf(code);

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>沙盤 SANDTABLE</title>
 <meta name="description" content="台股 ETF 真實模擬操盤：真的行情、真的規則、假的錢。">
-<meta name="theme-color" content="#0f120e">
+<meta name="theme-color" content="#040405">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -15,13 +15,13 @@
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Big+Shoulders+Stencil+Display:wght@700;800&family=LXGW+WenKai+TC:wght@400;700&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Rajdhani:wght@600;700&family=Noto+Sans+TC:wght@400;500;700;900&display=swap">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <div class="app" id="app">
   <header class="bar">
-    <div class="brand"><span class="mk">沙盤</span><span class="en">SANDTABLE</span></div>
+    <div class="brand"><svg class="logo" viewBox="0 0 40 40" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff1cf"/><stop offset=".5" stop-color="#f2b84b"/><stop offset="1" stop-color="#9a6a24"/></linearGradient></defs><path d="M20 2.5 35.2 11.25v17.5L20 37.5 4.8 28.75v-17.5z" fill="none" stroke="url(#lg)" stroke-width="2"/><path d="M20 10.5 28.2 15.25v9.5L20 29.5l-8.2-4.75v-9.5z" fill="url(#lg)" opacity=".9"/><path d="M20 15.5 23.9 17.75v4.5L20 24.5l-3.9-2.25v-4.5z" fill="#040405"/></svg><span class="mk">沙盤</span><span class="en">SANDTABLE</span></div>
     <div class="clock"><b id="clk" class="num">--:--:--</b><span class="sub"><span id="phase" class="phase">連線中</span><span id="feed" class="feed" data-s="off"><i></i><span id="feedT"></span></span></span></div>
     <div class="row" style="gap:12px">
       <nav class="desk-nav" id="deskNav">
@@ -33,9 +33,9 @@
 
   <main class="main" id="main">
     <section class="stage" id="stage" aria-label="3D 戰情沙盤">
-      <div class="stage-loading" id="stageLoading">沙盤布置中…</div>
-      <div class="stage-key"><span><i style="background:#ff4a55"></i>漲</span><span><i style="background:#cdb88f"></i>平</span><span><i style="background:#1fbf86"></i>跌</span><span><i style="background:#4f86ff"></i>你的旗</span></div>
-      <button class="stage-btn" id="stageReset" type="button">回到全景</button>
+      <div class="stage-loading" id="stageLoading">戰術台啟動中</div>
+      <div class="hud-top"><div class="hud-chip" id="hudTx"></div><div class="hud-chip r" id="hudClose"></div></div>
+      <div class="hud-bot"><div class="breadth" id="hudBreadth"></div><button class="stage-btn" id="stageReset" type="button">回到全景</button></div>
       <div class="stage-tip" id="stageTip" hidden></div>
     </section>
     <section class="panes">
@@ -62,10 +62,16 @@
 
 <div class="ignite" id="ignite" hidden>
   <div>
+    <svg class="emblem" viewBox="0 0 200 200" aria-hidden="true"><defs><linearGradient id="eg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff1cf"/><stop offset=".5" stop-color="#f2b84b"/><stop offset="1" stop-color="#8d5d18"/></linearGradient></defs>
+      <g class="spin"><circle cx="100" cy="100" r="92" fill="none" stroke="#f2b84b" stroke-opacity=".55" stroke-width="1.5" stroke-dasharray="2 7"/><path d="M100 4v14M100 182v14M4 100h14M182 100h14" stroke="#ffd98e" stroke-width="2"/></g>
+      <g class="spin2"><circle cx="100" cy="100" r="78" fill="none" stroke="#ffd98e" stroke-opacity=".8" stroke-width="2" stroke-dasharray="70 52"/></g>
+      <path d="M100 38 153.7 69v62L100 162 46.3 131V69z" fill="none" stroke="url(#eg)" stroke-width="3"/>
+      <path d="M100 62 133 81v38L100 138 67 119V81z" fill="url(#eg)" opacity=".92"/>
+      <path d="M100 84 114 92v16L100 116 86 108V92z" fill="#040405"/></svg>
     <div class="t">沙盤</div>
     <div class="e">SANDTABLE</div>
-    <button class="cord" id="cord" type="button" aria-label="拉燈，進入沙盤"><span class="str"></span><span class="knob"></span><span class="lab">拉一下燈，進入沙盤</span></button>
-    <div class="sub">真的行情、真的規則、假的錢</div>
+    <button class="cord" id="cord" type="button" aria-label="啟動戰術台，進入沙盤">啟動戰術台</button>
+    <div class="sub">真的行情・真的規則・假的錢</div>
   </div>
 </div>
 <noscript><p style="padding:20px">沙盤需要開啟 JavaScript。</p></noscript>

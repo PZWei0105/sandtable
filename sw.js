@@ -6,7 +6,9 @@ const DATA = 'sandtable-data';
 const FONTS = 'sandtable-fonts';
 const SHELL_FILES = ['./', 'index.html', 'styles.css', 'manifest.webmanifest', 'src/app.js', 'src/rules.js', 'src/engine.js', 'src/data.js',
   'src/store.js', 'src/stats.js', 'src/dca.js', 'src/table3d.js', 'src/charts.js', 'src/fx.js', 'src/guide.js', 'vendor/three.module.min.js',
-  'vendor/three.core.min.js', 'icons/icon-192.png', 'icons/apple-touch-icon.png'];
+  'vendor/three.core.min.js', 'vendor/fx/EffectComposer.js', 'vendor/fx/Pass.js', 'vendor/fx/RenderPass.js', 'vendor/fx/ShaderPass.js',
+  'vendor/fx/MaskPass.js', 'vendor/fx/OutputPass.js', 'vendor/fx/UnrealBloomPass.js', 'vendor/fx/CopyShader.js', 'vendor/fx/LuminosityHighPassShader.js',
+  'vendor/fx/OutputShader.js', 'icons/icon-192.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));

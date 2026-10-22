@@ -37,7 +37,7 @@ const now = () => D.serverNow();
 let db = ST.load();
 const UI = {
   tab: 'table', sel: '0050', chart: 'intra', book: 'reg', q: '', seen: new Set(), seenFinal: new Set(),
-  table: null, ready: false, lastPhase: null, reportCache: null, orderView: 'today',
+  table: null, ready: false, lastPhase: null, reportCache: null, orderView: 'today', qmode: 'list', qcat: 'all', qsort: 'val', lastPx: null,
 };
 try { const s = JSON.parse(localStorage.getItem('sandtable.ui') || '{}'); if (s.sel) UI.sel = s.sel; if (s.tab) UI.tab = s.tab; } catch { /* 沒有就用預設 */ }
 function saveUI() { try { localStorage.setItem('sandtable.ui', JSON.stringify({ sel: UI.sel, tab: UI.tab })); } catch { /* 無所謂 */ } }
@@ -81,7 +81,7 @@ function toast(html, ms = 4200) {
   setTimeout(kill, ms);
 }
 function note(text, kind = '') {
-  toast(`<div class="slip"><div class="h"><span class="side ${kind}">${kind === 'B' ? '買' : kind === 'S' ? '賣' : '沙盤'}</span></div><div class="m" style="font-size:14px;color:#2a241a">${text}</div></div>`, 3600);
+  toast(`<div class="slip"><div class="h"><span class="side ${kind}">${kind === 'B' ? '買' : kind === 'S' ? '賣' : '沙盤'}</span></div><div class="m" style="font-size:14px;color:var(--ivory)">${text}</div></div>`, 3600);
 }
 function modal(html, { onMount, wide } = {}) {
   const host = $('#modalHost');
@@ -135,7 +135,7 @@ $('#deskNav').addEventListener('click', (e) => {
 async function main() {
   applySettings();
   const ig = $('#ignite');
-  // 拉燈：每天第一次打開才有（之後直接進入，點一下畫面就有聲音）
+  // 啟動畫面：每天第一次打開才有（之後直接進入，點一下畫面就有聲音）
   let lit = null;
   try { lit = localStorage.getItem('sandtable.lit'); } catch { /* 沒關係 */ }
   const todayStr = String(R.tw(Date.now()).d);
@@ -292,6 +292,8 @@ function announce(quiet) {
 function tick() {
   const t = now();
   $('#clk').textContent = HMS(t);
+  const hc = $('#hudClose');
+  if (hc) hc.innerHTML = hudCountdown(t);
   const ph = R.marketPhase(D.S.cal, t);
   const el = $('#phase');
   el.dataset.p = ph.phase;
@@ -349,7 +351,7 @@ function initTable() {
       tip.hidden = false;
     },
   });
-  host.querySelectorAll('.stage-key, .stage-btn, .stage-tip').forEach((x) => host.appendChild(x));
+  host.querySelectorAll('.hud-top, .hud-bot, .stage-tip').forEach((x) => host.appendChild(x));
   $('#stageReset').addEventListener('click', () => { UI.table.reset(); play('tap'); });
   updateTable(true);
 }
@@ -358,7 +360,7 @@ function updateTable(intro) {
   UI.table.setData(tableItems(), { intro });
   markTable();
 }
-/** 只更新藍旗（持有）、藍圈（掛單）與選取，不動地形 */
+/** 只更新寶藍信標（持有）、寶藍光圈（掛單）、金星（自選）與選取，不動地形 */
 function markTable() {
   if (!UI.table) return;
   const r = run();
@@ -367,14 +369,16 @@ function markTable() {
     UI.table.setHeld(Lg.holdings.filter((h) => h.sh > 0).map((h) => h.code));
     UI.table.setPending([...new Set(r.orders.filter((o) => { const s = E.orderStatus(r, o).st; return ['wait', 'queued', 'live', 'part', 'cancelling'].includes(s); }).map((o) => o.code))]);
   } else { UI.table.setHeld([]); UI.table.setPending([]); }
+  if (UI.table.setWatch) UI.table.setWatch(db.settings.watch || []);
   UI.table.select(UI.sel);
 }
 function selectCode(c, go = true) {
   UI.sel = c;
   saveUI();
   if (UI.table) { UI.table.select(c); UI.table.focus(c); }
+  if (go) UI.qmode = 'detail';
   if (go && UI.tab !== 'quote' && !window.matchMedia('(min-width:1100px)').matches) setTab('quote');
-  else renderQuote();
+  else if (UI.tab === 'quote' || window.matchMedia('(min-width:1100px)').matches) renderQuote();
 }
 
 // ------------------------------------------------------------------ 全部重畫
@@ -397,50 +401,187 @@ function render(t) {
   else if (t === 'report') renderReport();
 }
 
-// ------------------------------------------------------------------ 沙盤頁：選取的那一格、大盤、漲跌、你的旗子、新聞
-function renderTablePane() {
-  const el = $('#pTable');
-  const r = run();
-  const sel = D.row(UI.sel);
-  const ch = D.changeOf(UI.sel);
+// ------------------------------------------------------------------ 小圖：走勢線、星號
+/** 走勢線（SVG）：今天的盤中走勢（沒有就用最近 40 天），虛線是昨收，最後一點發光。
+ *  大張的照時間畫（看得出今天走到哪裡）；清單裡的小張 fit＝撐滿（看得清楚形狀） */
+function sparkSVG(code, w = 120, h = 34, fit = false) {
+  const sp = D.sparkOf(code);
+  if (sp.pts.length < 2) return `<svg class="spk" viewBox="0 0 ${w} ${h}"></svg>`;
+  const ys = sp.pts.map((x) => x[1]);
+  if (isNum(sp.ref)) ys.push(sp.ref);
+  let lo = Math.min(...ys);
+  let hi = Math.max(...ys);
+  if (hi - lo < 1e-9) { lo -= 0.5; hi += 0.5; }
+  const x0 = sp.intra && !fit ? 0 : sp.pts[0][0];
+  const x1 = sp.intra && !fit ? Math.max(270, sp.pts[sp.pts.length - 1][0]) : sp.pts[sp.pts.length - 1][0];
+  const X = (x) => ((x - x0) / Math.max(1e-9, x1 - x0)) * (w - 4) + 2;
+  const Y = (y) => h - 3 - ((y - lo) / (hi - lo)) * (h - 6);
+  const last = sp.pts[sp.pts.length - 1];
+  const dir = isNum(sp.ref) ? Math.sign(last[1] - sp.ref) : Math.sign(last[1] - sp.pts[0][1]);
+  const col = dir > 0 ? 'var(--up)' : dir < 0 ? 'var(--down)' : 'var(--gold)';
+  const d = sp.pts.map((x, i) => `${i ? 'L' : 'M'}${X(x[0]).toFixed(1)} ${Y(x[1]).toFixed(1)}`).join(' ');
+  const area = `${d} L${X(last[0]).toFixed(1)} ${h} L${X(sp.pts[0][0]).toFixed(1)} ${h} Z`;
+  const ref = isNum(sp.ref) ? `<line class="ref" x1="0" x2="${w}" y1="${Y(sp.ref).toFixed(1)}" y2="${Y(sp.ref).toFixed(1)}"/>` : '';
+  return `<svg class="spk" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${ref}<path class="ar" d="${area}" fill="${col}"/><path class="ln" d="${d}" stroke="${col}" style="filter:drop-shadow(0 0 3px ${col})"/><circle cx="${X(last[0]).toFixed(1)}" cy="${Y(last[1]).toFixed(1)}" r="2.6" fill="${col}" style="filter:drop-shadow(0 0 4px ${col})"/></svg>`;
+}
+const STAR = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4L2.8 9.5l6.4-.8z"/></svg>';
+const STAR_O = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4L2.8 9.5l6.4-.8z"/></svg>';
+function starBtn(code) {
+  const on = (db.settings.watch || []).includes(code);
+  return `<button class="star" type="button" data-star="${code}" aria-pressed="${on}" aria-label="${on ? '移出自選' : '加入自選'}">${on ? STAR : STAR_O}</button>`;
+}
+function toggleWatch(code) {
+  let on = false;
+  db = ST.update((x) => {
+    const w = x.settings.watch || [];
+    on = !w.includes(code);
+    x.settings.watch = on ? [...w, code].slice(-30) : w.filter((k) => k !== code);
+  });
+  note(on ? `${code} 加入自選` : `${code} 移出自選`);
+  fx(on ? 'stamp' : 'tap');
+  if (UI.table && UI.table.setWatch) UI.table.setWatch(db.settings.watch || []);
+}
+/** 成交值：億／萬 */
+function VAL(x) {
+  if (!isNum(x) || x <= 0) return '—';
+  if (x >= 1e8) return `${(x / 1e8).toFixed(x >= 1e10 ? 0 : 1)} 億`;
+  return `${Math.round(x / 1e4).toLocaleString('zh-TW')} 萬`;
+}
+const PILL = (pct) => `<span class="pill ${cls(pct)}">${PCT(pct)}</span>`;
+
+// ------------------------------------------------------------------ 戰術台上的 HUD：大盤、收盤倒數、漲跌家數
+function hudCountdown(t) {
+  const ph = R.marketPhase(D.S.cal, t);
+  const { d } = R.tw(t);
+  const span = (k, v) => `<span class="k">${k}</span><span class="v num">${v}</span>`;
+  const left = (to) => {
+    const s = Math.max(0, Math.floor((to - t) / 1000));
+    return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+  if (ph.phase === 'continuous' || ph.phase === 'closing') return span('收盤倒數', left(R.atTW(d, 1330)));
+  if (ph.phase === 'preopen' || ph.phase === 'reserve') return span('開盤倒數', left(R.atTW(d, 900)));
+  if (ph.phase === 'oddpm' || ph.phase === 'afterhours' || ph.phase === 'post') return span('盤後撮合倒數', left(R.atTW(d, 1430)));
+  const nx = R.nextTradingDay(D.S.cal, d);
+  return span('下次開盤', `${MD(nx)}（${WD(nx)}）09:00`);
+}
+function renderHud() {
+  const tx = D.S.live && D.S.live.taiex;
+  const txPct = tx && tx.z && tx.y ? (tx.z / tx.y - 1) * 100 : null;
+  const a = $('#hudTx');
+  if (a) a.innerHTML = `<span class="k">加權指數 ${tx && tx.t ? esc(tx.t) : ''}</span><span class="v num ${cls(txPct)}">${tx && tx.z ? N(tx.z, 2) : '—'}<small>${PCT(txPct)}</small></span>`;
   const items = tableItems().filter((x) => isNum(x.pct));
   const up = items.filter((x) => x.pct > 0.001).length;
   const dn = items.filter((x) => x.pct < -0.001).length;
-  const tx = D.S.live && D.S.live.taiex;
-  const txPct = tx && tx.z && tx.y ? (tx.z / tx.y - 1) * 100 : null;
+  const fl = items.length - up - dn;
+  const tot = Math.max(1, items.length);
+  const b = $('#hudBreadth');
+  if (b) b.innerHTML = `<div class="lb"><b class="up">漲 ${up}</b><span>平 ${fl}</span><b class="down">跌 ${dn}</b></div><div class="track"><i class="u" style="width:${(up / tot) * 100}%"></i><i class="f" style="width:${(fl / tot) * 100}%"></i><i class="d" style="width:${(dn / tot) * 100}%"></i></div>`;
+  const c = $('#hudClose');
+  if (c) c.innerHTML = hudCountdown(now());
+}
+
+// ------------------------------------------------------------------ 沙盤頁：選定目標、自選、今天最熱、漲跌排行、你的部位、消息
+function renderTablePane() {
+  const el = $('#pTable');
+  const r = run();
+  renderHud();
+  const sel = D.row(UI.sel);
+  const ch = D.changeOf(UI.sel);
+  const items = tableItems().filter((x) => isNum(x.pct));
   const movers = [...items].sort((a, b) => b.pct - a.pct);
   const top = movers.slice(0, 5);
   const bot = movers.slice(-5).reverse();
   const Lg = r ? L(r) : null;
   const held = Lg ? Lg.holdings.filter((h) => h.sh > 0) : [];
-  const news = ((D.S.news && D.S.news.items) || []).filter((x) => x.kind !== 'opinion').slice(0, 6);
-  const moverLi = (x) => `<div class="li tap" data-code="${x.c}"><div class="t"><span class="code">${x.c}</span>${esc(x.n)}</div><div class="v ${cls(x.pct)}">${PCT(x.pct)}</div><div class="s">${esc(CAT_NAME[x.k] || '')}</div><div class="w num">${P(x.px)}</div></div>`;
+  const heldSet = new Set(held.map((h) => h.code));
+  const watch = (db.settings.watch || []).filter((c) => D.row(c));
+  const hot = (D.S.summary ? D.S.summary.etfs : []).map((x) => ({ c: x.c, n: x.n, val: D.valueOf(x.c) })).sort((a, b) => b.val - a.val).slice(0, 8);
+  const hotMax = hot.length ? hot[0].val : 1;
+  const news = ((D.S.news && D.S.news.items) || []).filter((x) => x.kind !== 'opinion').slice(0, 8);
+  const SRC = { cna: '中央社', twse_news: '證交所', fsc: '金管會', cbc: '央行' };
+  const maxMv = Math.max(0.01, ...movers.map((x) => Math.abs(x.pct)));
+  const card = (c) => {
+    const rw = D.row(c);
+    const x = D.changeOf(c);
+    return `<div class="card ${cls(x.pct)} ${c === UI.sel ? 'sel' : ''}" data-code="${c}">${heldSet.has(c) ? '<i class="held" title="你持有"></i>' : ''}
+      <div class="cd">${c}</div><div class="nm">${esc(rw ? rw.n : '')}</div>
+      <div class="px ${cls(x.pct)}">${P(x.px)}</div><div class="ch ${cls(x.pct)}">${isNum(x.ch) ? `${x.ch > 0 ? '▲' : x.ch < 0 ? '▼' : ''}${Math.abs(x.ch).toFixed(2)}` : ''} ${PCT(x.pct)}</div>
+      ${sparkSVG(c, 134, 34)}</div>`;
+  };
+  const mv = (x, dir) => `<div class="mv ${dir}" data-code="${x.c}"><i style="width:${Math.min(100, (Math.abs(x.pct) / maxMv) * 100)}%"></i><div><b>${x.c}</b><small>${esc(x.n)}</small></div><span class="${cls(x.pct)}">${PCT(x.pct)}</span></div>`;
   el.innerHTML = `
-    ${sel ? `<div class="dossier only-m" style="margin-top:22px"><div class="tab">選定目標</div>
-      <div class="qhead"><div><span class="cd">${sel.c}</span><span class="nm">${esc(sel.n)}</span><div class="dim" style="font-size:12px">${esc(CAT_NAME[sel.k] || '')}</div></div>
-      <div style="text-align:right"><div class="num ${cls(ch.pct)}" style="font-size:26px;font-weight:700">${P(ch.px)}</div><div class="num ${cls(ch.pct)}">${PCT(ch.pct)}</div></div></div>
-      <div class="row" style="margin-top:10px"><button class="btn grow" data-go="quote">看盤</button><button class="btn buy grow" data-trade="B">買進</button><button class="btn sell grow" data-trade="S">賣出</button></div></div>` : ''}
-    <div class="dossier"><div class="tab">大盤 <small>${tx && tx.t ? `${esc(tx.t)}` : ''}</small></div>
-      <div class="row sp"><div><div class="dim" style="font-size:12px">加權指數</div><div class="num ${cls(txPct)}" style="font-size:24px;font-weight:700">${tx && tx.z ? N(tx.z, 2) : '—'}</div></div>
-      <div class="num ${cls(txPct)}" style="font-size:18px">${PCT(txPct)}</div>
-      <div style="text-align:right"><div class="dim" style="font-size:12px">ETF 漲／跌</div><div class="num" style="font-size:18px"><span class="up">${up}</span> ／ <span class="down">${dn}</span></div></div></div>
-    </div>
-    <div class="dossier"><div class="tab">今天漲最多</div><div class="list">${top.map(moverLi).join('') || '<div class="empty">還沒有行情</div>'}</div></div>
-    <div class="dossier"><div class="tab">今天跌最多</div><div class="list">${bot.map(moverLi).join('') || '<div class="empty">還沒有行情</div>'}</div></div>
-    ${held.length ? `<div class="dossier you only-m"><div class="tab">你的旗子</div><div class="list">${held.map((h) => `<div class="li tap" data-code="${h.code}"><div class="t"><span class="code">${h.code}</span>${esc((D.row(h.code) || {}).n || '')}</div><div class="v">${N(h.mv)}</div><div class="s">${SH(h.sh)}</div><div class="w num ${cls(h.mv - h.cost)}">${N(h.mv - h.cost)}</div></div>`).join('')}</div></div>` : ''}
-    <div class="dossier"><div class="tab">官方消息 <small>中央社・證交所・金管會・央行</small></div><div class="list">${news.map((n) => `<a class="li" href="${esc(n.url)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit"><div class="t" style="font-weight:400;font-size:14px">${esc(n.t)}</div><div class="s">${esc({ cna: '中央社', twse_news: '證交所', fsc: '金管會', cbc: '央行' }[n.src] || n.src)}・${n.ts ? esc(n.ts.slice(5, 16).replace('T', ' ')) : MD(n.d)}</div></a>`).join('') || '<div class="empty">目前沒有消息</div>'}</div></div>`;
+    ${sel ? `<div class="dossier only-m"><div class="tab">選定目標 <small>${esc(CAT_NAME[sel.k] || '')}</small></div><div class="act">${starBtn(sel.c)}</div>
+      <div class="target"><div><div class="cd">${sel.c}</div><div class="nm">${esc(sel.n)}</div></div>
+        <div><div class="px ${cls(ch.pct)}" id="tgtPx">${P(ch.px)}</div><div class="ch ${cls(ch.pct)}">${isNum(ch.ch) ? `${ch.ch > 0 ? '▲' : ch.ch < 0 ? '▼' : ''}${Math.abs(ch.ch).toFixed(2)}` : ''} ${PCT(ch.pct)}</div></div>
+        ${sparkSVG(sel.c, 320, 46)}</div>
+      <div class="row" style="margin-top:12px"><button class="btn grow" data-go="quote">看盤</button><button class="btn buy grow" data-trade="B">買進</button><button class="btn sell grow" data-trade="S">賣出</button></div></div>` : ''}
+    <div class="dossier"><div class="tab">自選 <small>${watch.length} 檔・點星號加減</small></div>
+      <div class="rail">${watch.map(card).join('')}<button class="card add" type="button" data-go="list"><span><b>＋</b>加自選</span></button></div></div>
+    <div class="dossier"><div class="tab">今天最熱 <small>成交值最大的 8 檔</small></div>
+      <div class="list">${hot.map((x, i) => { const c2 = D.changeOf(x.c); return `<div class="rank" data-code="${x.c}"><div class="no">${i + 1}</div><div class="t"><span class="code">${x.c}</span>${esc(x.n)}</div>${sparkSVG(x.c, 70, 30, true)}<div class="r"><span class="p ${cls(c2.pct)}">${P(c2.px)}</span>${PILL(c2.pct)}</div><div class="bar2"><i style="width:${Math.max(4, (x.val / hotMax) * 100)}%"></i></div><div class="val">成交值${D.valueEst(x.c) ? '約' : ''} ${VAL(x.val)}</div></div>`; }).join('') || '<div class="empty">還沒有行情</div>'}</div></div>
+    <div class="dossier"><div class="tab">漲跌排行</div>
+      ${top.length ? `<div class="duo"><div><h4 class="up">漲最多</h4>${top.map((x) => mv(x, 'up')).join('')}</div><div><h4 class="down">跌最多</h4>${bot.map((x) => mv(x, 'down')).join('')}</div></div>` : '<div class="empty">還沒有行情</div>'}</div>
+    ${held.length ? `<div class="dossier you only-m"><div class="tab">你的部位 <small>${held.length} 檔</small></div><div class="list">${held.map((h) => `<div class="li tap" data-code="${h.code}"><div class="t"><span class="code" style="color:var(--you-hi)">${h.code}</span>${esc((D.row(h.code) || {}).n || '')}</div><div class="v">${N(h.mv)}</div><div class="s">${SH(h.sh)}・均價 ${P(h.avg)}</div><div class="w num ${cls(h.mv - h.cost)}">${N(h.mv - h.cost)}</div></div>`).join('')}</div></div>` : ''}
+    <div class="dossier news"><div class="tab">官方消息</div>
+      ${news.length ? `<div class="ticker"><div>${news.map((n) => `<span><b>${esc(SRC[n.src] || n.src)}</b>${esc(n.t)}</span>`).join('')}</div></div>` : ''}
+      <div class="list">${news.map((n) => `<a class="li" href="${esc(n.url)}" target="_blank" rel="noopener"><div class="t" style="font-weight:400;font-size:14px;white-space:normal"><span class="src">${esc(SRC[n.src] || n.src)}</span>${esc(n.t)}</div><div class="s">${n.ts ? esc(n.ts.slice(5, 16).replace('T', ' ')) : MD(n.d)}</div></a>`).join('') || '<div class="empty">目前沒有消息</div>'}</div></div>`;
   el.onclick = (e) => {
+    const st = e.target.closest('[data-star]');
+    if (st) { toggleWatch(st.dataset.star); renderTablePane(); return; }
+    const go = e.target.closest('[data-go]');
+    if (go) {
+      if (go.dataset.go === 'list') { UI.qmode = 'list'; UI.qcat = 'all'; setTab('quote'); return; }
+      UI.qmode = 'detail'; setTab('quote'); return;
+    }
     const li = e.target.closest('[data-code]');
-    if (li) { selectCode(li.dataset.code, true); return; }
-    if (e.target.closest('[data-go="quote"]')) { setTab('quote'); return; }
+    if (li) { selectCode(li.dataset.code, false); play('tap'); renderTablePane(); if (!window.matchMedia('(min-width:1100px)').matches) window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
     const tr = e.target.closest('[data-trade]');
     if (tr) openTicket(UI.sel, tr.dataset.trade);
   };
 }
 
-// ------------------------------------------------------------------ 看盤
+// ------------------------------------------------------------------ 看盤：全部 ETF 清單（類別、搜尋、排序）＋單檔
+const QCATS = [['all', '全部'], ['watch', '自選'], ['held', '持有'], ['broad', '市值型'], ['div', '高股息'], ['theme', '產業主題'], ['active', '主動式'], ['overseas', '海外股票'], ['bond', '債券'], ['lev', '槓桿型'], ['inv', '反向型'], ['fut', '期貨商品']];
+function renderQuoteList(el) {
+  const rows = D.S.summary ? D.S.summary.etfs : [];
+  const r = run();
+  const Lg = r ? L(r) : null;
+  const heldSet = new Set(Lg ? Lg.holdings.filter((h) => h.sh > 0).map((h) => h.code) : []);
+  const watch = db.settings.watch || [];
+  const cat = UI.qcat || 'all';
+  const qq = (UI.q || '').toUpperCase();
+  const count = (k) => (k === 'all' ? rows.length : k === 'watch' ? watch.length : k === 'held' ? heldSet.size : rows.filter((x) => x.k === k).length);
+  let list = rows.filter((x) => (cat === 'all' ? true : cat === 'watch' ? watch.includes(x.c) : cat === 'held' ? heldSet.has(x.c) : x.k === cat));
+  if (qq) list = list.filter((x) => x.c.toUpperCase().includes(qq) || x.n.toUpperCase().includes(qq));
+  const sort = UI.qsort || 'val';
+  const enriched = list.map((x) => ({ x, ch: D.changeOf(x.c), val: D.valueOf(x.c) }));
+  if (sort === 'pct') enriched.sort((a, b) => (b.ch.pct ?? -1e9) - (a.ch.pct ?? -1e9));
+  else if (sort === 'pctd') enriched.sort((a, b) => (a.ch.pct ?? 1e9) - (b.ch.pct ?? 1e9));
+  else if (sort === 'code') enriched.sort((a, b) => (a.x.c < b.x.c ? -1 : 1));
+  else enriched.sort((a, b) => b.val - a.val);
+  if (cat === 'watch' && sort === 'val' && !qq) enriched.sort((a, b) => watch.indexOf(a.x.c) - watch.indexOf(b.x.c));
+  el.innerHTML = `
+    <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="qSearch" type="search" placeholder="代號或名稱，例如 0050、高股息、債" value="${esc(UI.q)}" autocomplete="off"></div>
+    <div class="chips" style="margin-top:10px">${QCATS.filter(([k]) => k === 'all' || k === 'watch' || count(k) > 0).map(([k, n]) => `<button class="chip" data-cat="${k}" aria-pressed="${cat === k}">${n} <span class="n">${count(k)}</span></button>`).join('')}</div>
+    <div class="qbar"><div class="seg">${[['val', '成交值'], ['pct', '漲幅'], ['pctd', '跌幅'], ['code', '代號']].map(([k, n]) => `<button data-sort="${k}" aria-pressed="${sort === k}">${n}</button>`).join('')}</div><span class="cnt">${enriched.length} 檔</span></div>
+    <div class="dossier" style="padding:4px 12px"><div class="list">${enriched.map(({ x, ch }) => `<div class="qrow ${x.c === UI.sel ? 'sel' : ''}" data-code="${x.c}"><div class="t"><b>${x.c}${heldSet.has(x.c) ? '<i class="tag you">持有</i>' : ''}</b><span>${esc(x.n)}</span></div>${sparkSVG(x.c, 64, 26, true)}<div class="r"><span class="p ${cls(ch.pct)}">${P(ch.px)}</span>${PILL(ch.pct)}</div>${starBtn(x.c)}</div>`).join('') || `<div class="empty"><span class="brush">${cat === 'watch' ? '還沒有自選' : '找不到'}</span>${cat === 'watch' ? '在清單裡點星號，就會出現在這裡和首頁' : '換個關鍵字試試'}</div>`}</div></div>`;
+  const inp = $('#qSearch', el);
+  inp.oninput = () => { UI.q = inp.value.trim(); const pos = inp.selectionStart; renderQuote().then(() => { const i2 = $('#qSearch'); if (i2) { i2.focus(); i2.setSelectionRange(pos, pos); } }); };
+  el.onclick = (e) => {
+    const st = e.target.closest('[data-star]');
+    if (st) { toggleWatch(st.dataset.star); renderQuote(); return; }
+    const c = e.target.closest('[data-cat]');
+    if (c) { UI.qcat = c.dataset.cat; play('tap'); renderQuote(); return; }
+    const so = e.target.closest('[data-sort]');
+    if (so) { UI.qsort = so.dataset.sort; play('tap'); renderQuote(); return; }
+    const li = e.target.closest('[data-code]');
+    if (li) { selectCode(li.dataset.code, false); UI.qmode = 'detail'; play('tap'); renderQuote(); window.scrollTo({ top: 0 }); }
+  };
+}
+
 async function renderQuote() {
   const el = $('#pQuote');
+  if ((UI.qmode || 'list') === 'list') { renderQuoteList(el); return; }
   const code = UI.sel;
   const r0 = D.row(code);
   const q = D.quoteOf(code);
@@ -450,28 +591,25 @@ async function renderQuote() {
   const r = run();
   const Lg = r ? L(r) : null;
   const h = Lg ? Lg.holdings.find((x) => x.code === code && x.sh > 0) : null;
-  const watch = db.settings.watch || [];
-  const starred = watch.includes(code);
   const lim = R.limitsOf(q);
-  const results = UI.q ? (D.S.summary ? D.S.summary.etfs : []).filter((x) => x.c.toUpperCase().includes(UI.q.toUpperCase()) || x.n.includes(UI.q)).slice(0, 24) : [];
   const bk = UI.book === 'odd' ? qo : q;
   const asks = (bk && bk.a) || [];
   const bids = (bk && bk.b) || [];
   const maxV = Math.max(1, ...asks.map((x) => x[1]), ...bids.map((x) => x[1]));
   const unit = UI.book === 'odd' ? 1 : 1000;
-  const lvl = (x, side) => `<div class="lv"><i style="width:${Math.round((x[1] / maxV) * 100)}%"></i><span class="${x[0] > ch.ref ? 'up' : x[0] < ch.ref ? 'down' : ''}">${P(x[0])}</span><span>${N(Math.round(x[1] / unit))}</span></div>`;
+  const lvl = (x) => `<div class="lv"><i style="width:${Math.round((x[1] / maxV) * 100)}%"></i><span class="${x[0] > ch.ref ? 'up' : x[0] < ch.ref ? 'down' : ''}">${P(x[0])}</span><span>${N(Math.round(x[1] / unit))}</span></div>`;
   const dv = r0 && r0.dv;
   const ex = dv && dv.d >= R.tw(now()).d ? `${MD(dv.d)} 除息${dv.cash ? ` ${dv.cash} 元` : '（金額待公告）'}` : null;
+  const prevPx = UI.lastPx && UI.lastPx.code === code ? UI.lastPx.px : null;
+  const flash = isNum(prevPx) && isNum(ch.px) && ch.px !== prevPx ? (ch.px > prevPx ? 'flash-up' : 'flash-down') : '';
+  UI.lastPx = { code, px: ch.px };
   el.innerHTML = `
-    <div class="search"><input id="qSearch" type="search" placeholder="代號或名稱，例如 0050、高股息" value="${esc(UI.q)}" autocomplete="off"></div>
-    ${results.length ? `<div class="list results">${results.map((x) => `<div class="li tap" data-code="${x.c}"><div class="t"><span class="code">${x.c}</span>${esc(x.n)}</div><div class="v ${cls(D.changeOf(x.c).pct)}">${PCT(D.changeOf(x.c).pct)}</div></div>`).join('')}</div>` : ''}
-    ${watch.length ? `<div class="row" style="margin-top:8px">${watch.map((c) => `<button class="chip ${c === code ? 'on' : ''}" data-code="${c}">${c}</button>`).join('')}</div>` : ''}
+    <div class="row sp"><button class="back" type="button" data-back="1"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>全部 ETF</button>${r0 ? starBtn(code) : ''}</div>
     ${!r0 ? '<div class="empty">找不到這一檔</div>' : `
-    <div class="dossier"><div class="tab">${esc(CAT_NAME[r0.k] || '')}</div><div class="act"><button class="btn sm ghost" id="star" aria-pressed="${starred}">${starred ? '★ 已加自選' : '☆ 自選'}</button></div>
-      <div class="qhead"><div><span class="cd">${code}</span><span class="nm">${esc(r0.n)}</span>
-        <div class="dim" style="font-size:12px">${q && q.t ? `行情 ${String(q.t).padStart(6, '0').replace(/(\d\d)(\d\d)(\d\d)/, '$1:$2:$3')}` : '收盤資料'}${h ? ` ・ <span class="you">持有 ${SH(h.sh)}</span>` : ''}</div></div></div>
-      <div class="bigrow" style="margin-top:6px"><span class="big ${cls(ch.ch)}">${P(ch.px)}</span><span class="chg ${cls(ch.ch)}">${isNum(ch.ch) ? `${ch.ch > 0 ? '▲' : ch.ch < 0 ? '▼' : ''}${Math.abs(ch.ch).toFixed(2)}` : ''} ${PCT(ch.pct)}</span></div>
-      <div class="kv" style="margin-top:10px">
+    <div class="dossier"><div class="tab">${esc(CAT_NAME[r0.k] || '')} <small>${q && q.t ? `行情 ${String(q.t).padStart(6, '0').replace(/(\d\d)(\d\d)(\d\d)/, '$1:$2:$3')}` : '收盤資料'}</small></div>
+      <div class="qhead"><div><span class="cd">${code}</span><span class="nm">${esc(r0.n)}</span>${h ? ` <span class="tag you">持有 ${SH(h.sh)}</span>` : ''}</div></div>
+      <div class="bigrow" style="margin-top:8px"><span class="big ${cls(ch.ch)} ${flash}">${P(ch.px)}</span><span class="chg ${cls(ch.ch)}">${isNum(ch.ch) ? `${ch.ch > 0 ? '▲' : ch.ch < 0 ? '▼' : ''}${Math.abs(ch.ch).toFixed(2)}` : ''} ${PCT(ch.pct)}</span></div>
+      <div class="kv" style="margin-top:12px">
         <div><span>昨收</span><b>${P(ch.ref)}</b></div>
         <div><span>開盤</span><b class="${cls((q && q.o) - ch.ref)}">${P(q && q.o)}</b></div>
         <div><span>成交量</span><b>${q ? N(Math.round(q.v / 1000)) : '—'} 張</b></div>
@@ -480,14 +618,15 @@ async function renderQuote() {
         <div><span>${termHTML('漲跌停')}</span><b>${lim.none ? '無限制' : `<span class="up">${P(lim.up)}</span>／<span class="down">${P(lim.down)}</span>`}</b></div>
         <div><span>預估淨值</span><b>${lv && lv.nav ? P(lv.nav) : '—'}</b></div>
         <div><span>折溢價</span><b class="${lv && lv.prem > 0.5 ? 'warn' : ''}">${lv && isNum(lv.prem) ? PCT(lv.prem) : '—'}</b></div>
-        <div><span>配息</span><b style="font-size:13px">${ex || '—'}</b></div>
+        <div><span>成交值${D.valueEst(code) ? '（估）' : ''}</span><b>${VAL(D.valueOf(code))}</b></div>
       </div>
+      ${ex ? `<p class="note">配息：${esc(ex)}</p>` : ''}
     </div>
     <div class="dossier"><div class="tab">走勢</div><div class="act"><div class="seg"><button data-chart="intra" aria-pressed="${UI.chart === 'intra'}">分時</button><button data-chart="k" aria-pressed="${UI.chart === 'k'}">日 K</button></div></div>
       <div class="chart-wrap"><canvas id="qChart"></canvas><div class="tip" id="qTip" hidden></div></div>
     </div>
     <div class="dossier"><div class="tab">${termHTML('五檔')}</div><div class="act"><div class="seg"><button data-book="reg" aria-pressed="${UI.book === 'reg'}">整股（張）</button><button data-book="odd" aria-pressed="${UI.book === 'odd'}">零股（股）</button></div></div>
-      ${asks.length || bids.length ? `<div class="book"><div class="bid"><h4>委買</h4>${bids.map((x) => lvl(x, 'b')).join('')}</div><div class="ask"><h4>委賣</h4>${asks.map((x) => lvl(x, 'a')).join('')}</div></div>
+      ${asks.length || bids.length ? `<div class="book"><div class="bid"><h4>委買</h4>${bids.map(lvl).join('')}</div><div class="ask"><h4>委賣</h4>${asks.map(lvl).join('')}</div></div>
       <p class="note">${bk && bk.t ? `${String(bk.t).padStart(6, '0').replace(/(\d\d)(\d\d)(\d\d)/, '$1:$2:$3')} 的快照，約 5 分鐘更新一次` : ''}</p>` : `<div class="empty">${UI.book === 'odd' ? '現在沒有零股掛單資料' : '現在沒有掛單資料'}</div>`}
     </div>
     ${h ? `<div class="dossier you"><div class="tab">你的部位</div><div class="kv">
@@ -496,20 +635,14 @@ async function renderQuote() {
     </div>${h.todayBuy && !daytradeOk(r, Lg) ? `<p class="note">今天買的 ${SH(h.todayBuy)} 要明天才能賣（還沒有${termHTML('當沖')}資格）。</p>`
       : h.todayBuy > (h.todayReg || 0) ? `<p class="note">今天用零股、盤後買的 ${SH(h.todayBuy - (h.todayReg || 0))} 要明天才能賣（零股不能${termHTML('當沖')}）。</p>` : ''}</div>` : ''}
     <div class="tradebar"><button class="btn buy" data-trade="B">買 進</button><button class="btn sell" data-trade="S">賣 出</button></div>`}`;
-  const inp = $('#qSearch', el);
-  inp.oninput = () => { UI.q = inp.value.trim(); const pos = inp.selectionStart; renderQuote().then(() => { const i2 = $('#qSearch'); i2.focus(); i2.setSelectionRange(pos, pos); }); };
   el.onclick = (e) => {
-    const li = e.target.closest('[data-code]');
-    if (li) { UI.q = ''; selectCode(li.dataset.code, false); renderQuote(); return; }
+    if (e.target.closest('[data-back]')) { UI.qmode = 'list'; play('tap'); renderQuote(); return; }
+    const st = e.target.closest('[data-star]');
+    if (st) { toggleWatch(st.dataset.star); renderQuote(); return; }
     const c = e.target.closest('[data-chart]');
     if (c) { UI.chart = c.dataset.chart; renderQuote(); return; }
     const b = e.target.closest('[data-book]');
     if (b) { UI.book = b.dataset.book; renderQuote(); return; }
-    if (e.target.closest('#star')) {
-      db = ST.update((x) => { const w = x.settings.watch || []; x.settings.watch = w.includes(code) ? w.filter((k) => k !== code) : [...w, code].slice(-20); });
-      renderQuote();
-      return;
-    }
     const tr = e.target.closest('[data-trade]');
     if (tr) openTicket(code, tr.dataset.trade);
   };
@@ -581,7 +714,7 @@ function renderOrders() {
       <button data-view="today" aria-pressed="${UI.orderView === 'today'}">今天</button><button data-view="fills" aria-pressed="${UI.orderView === 'fills'}">成交</button><button data-view="all" aria-pressed="${UI.orderView === 'all'}">全部</button></div></div>
       ${!D.serverOk() ? '<div class="dossier hazard" style="margin:24px 0 8px"><div class="tab warn">離線</div><p class="note">連不上網路：撮合暫停，什麼都不判斷、不存。連上網路之後，才會用真的行情判斷這段時間的成交。</p></div>' : ''}
       ${openOnes.length ? `<p class="note">掛著 ${openOnes.length} 筆，後台每一輪新行情進來就會自動撮合。</p>` : ''}
-      ${list ? (list.map(slip).join('') || `<div class="empty"><span class="brush">桌上沒有紙條</span>${UI.orderView === 'today' ? '今天還沒下單' : '還沒有委託'}</div>`)
+      ${list ? (list.map(slip).join('') || `<div class="empty"><span class="brush">${UI.orderView === 'fills' ? '還沒有成交' : '還沒有委託'}</span>${UI.orderView === 'today' ? '今天還沒下單。到「看盤」選一檔，按買進或賣出' : '這一局還沒有紀錄'}</div>`)
         : (fills.map((f) => `<div class="slip"><span class="stamp filled">${f.sess === 'dca' ? '定期定額' : '成交'}</span><div class="h"><span class="side ${f.side}">${E.SIDE_NAME[f.side]}</span><span class="code">${f.code}</span><span class="nm">${esc((D.row(f.code) || {}).n || '')}</span></div>
           <div class="d">${SH(f.qty)} × ${P(f.px)} ＝ ${N(f.amt)}</div>
           <div class="m">${MD(f.d)} ${HMS(f.t)} ・ 手續費 ${N(f.fee)}${f.fee !== f.fin ? `（隔天退 ${N(f.fee - f.fin)}）` : ''}${f.tax ? ` ・ 證交稅 ${N(f.tax)}` : ''} ・ ${MD(R.settleDay(D.S.cal, f.d, 2))} 交割</div></div>`).join('') || '<div class="empty"><span class="brush">還沒有成交</span></div>')}
@@ -751,7 +884,7 @@ function openDcaForm() {
       const paint = () => {
         const row0 = D.row($('#dCode', m).value.trim().toUpperCase());
         $('#dName', m).textContent = row0 ? `${row0.n}（${CAT_NAME[row0.k] || ''}）` : '找不到這一檔';
-        $$('#dDays [data-day]', m).forEach((b) => { const on = days.has(Number(b.dataset.day)); b.style.borderColor = on ? 'var(--brass)' : ''; b.style.color = on ? 'var(--brass-2)' : ''; });
+        $$('#dDays [data-day]', m).forEach((b) => { const on = days.has(Number(b.dataset.day)); b.style.borderColor = on ? 'var(--gold)' : ''; b.style.color = on ? 'var(--gold-hi)' : ''; });
         const c = DCA.cutover(D.S.cal, R.tw(now()).d);
         $('#dWhen', m).textContent = `今天送出，${MD(c)}（${WD(c)}）起才會照這個設定扣款。`;
       };
@@ -900,10 +1033,10 @@ function settingsBlock() {
   const s = db.settings;
   const f = s.fees;
   return `<div class="dossier"><div class="tab">設定</div>
-    <div class="setting"><div class="l"><b>音效</b><small>沙沙聲、紙條、鼓聲、開收盤的鑼</small></div><input class="switch" type="checkbox" data-set="sound" ${s.sound ? 'checked' : ''}></div>
+    <div class="setting"><div class="l"><b>音效</b><small>新行情的聲納、送單、成交、開收盤的鑼</small></div><input class="switch" type="checkbox" data-set="sound" ${s.sound ? 'checked' : ''}></div>
     <div class="setting"><div class="l"><b>震動</b><small>只有 Android 手機有效</small></div><input class="switch" type="checkbox" data-set="haptics" ${s.haptics ? 'checked' : ''}></div>
-    <div class="setting"><div class="l"><b>動態效果</b><small>沙盤起伏、旗子飄動、印章</small></div><input class="switch" type="checkbox" data-set="fx" ${s.fx !== false ? 'checked' : ''}></div>
-    <div class="setting"><div class="l"><b>開機拉燈</b><small>每天第一次打開時拉燈進場；關掉就一律直接進入</small></div><input class="switch" type="checkbox" data-set="ignite" ${s.ignite !== false ? 'checked' : ''}></div>
+    <div class="setting"><div class="l"><b>動態效果</b><small>戰術台起伏、雷達掃描、信標、鎖定動畫</small></div><input class="switch" type="checkbox" data-set="fx" ${s.fx !== false ? 'checked' : ''}></div>
+    <div class="setting"><div class="l"><b>啟動畫面</b><small>每天第一次打開時先按「啟動戰術台」進場（手機要先點一下才能出聲）；關掉就一律直接進入</small></div><input class="switch" type="checkbox" data-set="ignite" ${s.ignite !== false ? 'checked' : ''}></div>
     <div class="setting"><div class="l"><b>3D 畫質</b><small>手機很燙就調低</small></div><select data-set="quality" class="field" style="margin:0"><option value="auto" ${s.quality === 'auto' ? 'selected' : ''}>自動</option><option value="high" ${s.quality === 'high' ? 'selected' : ''}>高</option><option value="low" ${s.quality === 'low' ? 'selected' : ''}>低</option></select></div>
     <div class="setting"><div class="l"><b>手續費條件</b><small>${Math.round(f.disc * 1000) / 100} 折・整股最低 ${f.min} 元・零股最低 ${f.minOdd} 元・${f.rebate === 'instant' ? '直接折扣' : '日退'}（新開的一局照這個算）</small></div><button class="btn sm" id="feeBtn">修改</button></div>
     <div class="setting"><div class="l"><b>規則說明</b><small>沙盤怎麼判斷成交、哪些地方做不到</small></div><button class="btn sm" id="rulesBtn">打開</button></div>
@@ -1155,7 +1288,7 @@ function openTicket(code, side) {
       return;
     }
     sh.innerHTML = `<div class="grab"></div>
-      <div class="row sp"><h2>${code} <span class="brush" style="font-size:16px;color:var(--graphite)">${esc(name)}</span></h2><button class="btn sm ghost" id="tClose">關閉</button></div>
+      <div class="row sp"><h2>${code} <span style="font-size:15px;font-weight:500;color:var(--text-2)">${esc(name)}</span></h2><button class="btn sm ghost" id="tClose">關閉</button></div>
       <div class="num ${cls(ch.ch)}" style="font-size:15px">${P(ch.px)} ${PCT(ch.pct)}${b1 || a1 ? ` <span class="dim">買一 ${P(b1)}／賣一 ${P(a1)}</span>` : ''}</div>
       <div class="ticket-side"><button class="B" data-side="B" aria-pressed="${st.side === 'B'}">買 進</button><button class="S" data-side="S" aria-pressed="${st.side === 'S'}">賣 出</button></div>
       <div class="row sp"><div class="seg"><button data-kind="lot" aria-pressed="${st.kind === 'lot'}">整股</button><button data-kind="odd" aria-pressed="${st.kind === 'odd'}">零股</button></div>
@@ -1172,7 +1305,7 @@ function openTicket(code, side) {
       </div>
       <div id="tCost">${costHTML(k, settleD)}</div>
       <div class="field"><label>為什麼這樣下？（覆盤用，可以不寫）</label>
-        <div class="quick">${TAGS.map((t) => `<button data-tag="${t}" style="${st.tags.includes(t) ? 'border-color:var(--brass);color:var(--brass-2)' : ''}">${t}</button>`).join('')}</div>
+        <div class="quick">${TAGS.map((t) => `<button data-tag="${t}" style="${st.tags.includes(t) ? 'border-color:var(--gold);color:var(--gold-hi)' : ''}">${t}</button>`).join('')}</div>
         <input id="tNote" maxlength="80" placeholder="一句話就好" value="${esc(st.note)}" style="margin-top:6px">
       </div>
       <div id="tErr">${errHTML(k)}</div>

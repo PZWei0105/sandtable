@@ -130,6 +130,33 @@ await test('定期定額用的收盤價：資料還沒到是 undefined、確定�
   S.k.set('0050', { d: [D], o: [108], h: [109], l: [108], c_: [108.4], v: [1] });
   assert.equal(m().close('0050', D), 108.4);
 });
+await test('走勢線：今天的盤中走勢（spark.json）＋最新價，參考價是昨收；不是今天的就用最近 40 天收盤', () => {
+  reset();
+  S.quotes = { at: sec(1012), reg: { '0050': { d: D, z: 108.0, y: 108.15, v: 2000 } }, odd: {} };
+  S.spark = { d: D, s: { '0050': [10, 108.5, 20, 108.3] } };
+  let sp = Dm.sparkOf('0050');
+  assert.equal(sp.intra, true);
+  assert.deepEqual(sp.pts, [[10, 108.5], [20, 108.3], [21, 108.0]], '最新價和走勢最後一點不同：補上');
+  assert.equal(sp.ref, 108.15);
+  S.spark = { d: 20261021, s: { '0050': [10, 100, 20, 101] } };
+  S.rows.set('0050', { c: '0050', m: 'tse', k: 'broad', d: 20261021, p: 108.15, sp: [100, 104, 108.15] });
+  sp = Dm.sparkOf('0050');
+  assert.equal(sp.intra, false, '昨天的盤中走勢不拿來當今天的');
+  assert.deepEqual(sp.pts.map((x) => x[1]), [100, 104, 108.15]);
+  assert.deepEqual(Dm.sparkOf('9999').pts, [], '沒有資料：空的');
+});
+await test('成交值：盤中用累計量×現價估（標成估的），官方收盤資料出來以後用官方的', () => {
+  reset();
+  S.rows.set('0050', { c: '0050', m: 'tse', k: 'broad', d: 20261021, p: 108.15, val: 5e9 });
+  S.quotes = { at: sec(1012), reg: { '0050': { d: D, z: 108.0, y: 108.15, v: 30000000 } }, odd: {} };
+  assert.equal(Dm.valueOf('0050'), 30000000 * 108.0);
+  assert.equal(Dm.valueEst('0050'), true);
+  S.rows.set('0050', { c: '0050', m: 'tse', k: 'broad', d: D, p: 108.0, val: 3.3e9 });
+  assert.equal(Dm.valueOf('0050'), 3.3e9, '官方的出來了：用官方的');
+  assert.equal(Dm.valueEst('0050'), false);
+  S.quotes = null;
+  assert.equal(Dm.valueOf('0050'), 3.3e9);
+});
 await test('伺服器時間：用網站給的時間往後推，改手機時鐘也不會跳；離線不能撮合', async () => {
   reset();
   const realFetch = globalThis.fetch;

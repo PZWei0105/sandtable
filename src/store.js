@@ -5,12 +5,14 @@ import { DEFAULT_FEES, tw } from './rules.js';
 import { laterProg } from './engine.js';
 
 const KEY = 'sandtable.v1';
+// 預設的自選：台股最多人持有的幾檔熱門 ETF（和冷眼預設的關注一樣；不是讀冷眼的資料）
+export const DEFAULT_WATCH = ['0050', '00878', '00662', '0056', '00919', '00679B'];
 export const DEFAULT_SETTINGS = {
-  sound: true, haptics: true, fx: true, quality: 'auto', fees: { ...DEFAULT_FEES }, ignite: true,
+  sound: true, haptics: true, fx: true, quality: 'auto', fees: { ...DEFAULT_FEES }, ignite: true, watch: [...DEFAULT_WATCH],
 };
 
 function blank() {
-  return { v: 1, cur: null, runs: {}, order: [], settings: { ...DEFAULT_SETTINGS }, seq: 0, restores: [] };
+  return { v: 1, cur: null, runs: {}, order: [], settings: { ...DEFAULT_SETTINGS, watch: [...DEFAULT_WATCH] }, seq: 0, restores: [] };
 }
 
 export function load() {
@@ -20,6 +22,7 @@ export function load() {
     const db = JSON.parse(raw);
     if (!db || db.v !== 1 || typeof db.runs !== 'object') return blank();
     db.settings = { ...DEFAULT_SETTINGS, ...(db.settings || {}), fees: { ...DEFAULT_FEES, ...((db.settings || {}).fees || {}) } };
+    if (!Array.isArray(db.settings.watch)) db.settings.watch = [...DEFAULT_WATCH];
     db.order = Array.isArray(db.order) ? db.order : Object.keys(db.runs);
     db.restores = Array.isArray(db.restores) ? db.restores : [];
     return db;
