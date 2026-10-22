@@ -106,6 +106,22 @@ export function mergeEngine(db, runId, res) {
   return changed;
 }
 
+/** 定期定額的結果併進最新的存檔：每一期只記一次（id 固定）；連續失敗 3 次就把全部計畫停掉 */
+export function mergeDca(db, runId, res) {
+  const r = db.runs[runId];
+  if (!r) return false;
+  let changed = false;
+  const byId = new Map(r.fills.map((f) => [f.id, f]));
+  for (const f of res.newFills) if (!byId.has(f.id)) { byId.set(f.id, f); changed = true; }
+  r.fills = [...byId.values()].sort((a, b) => a.t - b.t || (a.id < b.id ? -1 : 1));
+  r.dcaLog = r.dcaLog || {};
+  for (const [k, v] of Object.entries(res.log || {})) if (!r.dcaLog[k]) { r.dcaLog[k] = v; changed = true; }
+  if (res.stopAt) {
+    for (const p of r.plans || []) if (!p.end || p.end > res.stopAt) { p.end = res.stopAt; p.why = '連續 3 次扣款失敗，國泰自動終止全部台股定期定額'; changed = true; }
+  }
+  return changed;
+}
+
 // ------------------------------------------------------------------ 備份
 async function gz(str) {
   if (typeof CompressionStream === 'undefined') return null;

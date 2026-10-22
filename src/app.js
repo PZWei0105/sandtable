@@ -8,6 +8,7 @@ import { createTable, CAT_NAME } from './table3d.js';
 import { drawIntraday, drawK, drawNav } from './charts.js';
 import { fx, unlock, setSound, setHaptics, play } from './fx.js';
 import { rulesHTML, TERMS } from './guide.js';
+import * as DCA from './dca.js';
 
 // ------------------------------------------------------------------ 小工具
 const $ = (s, el = document) => el.querySelector(s);
@@ -126,11 +127,16 @@ $('#deskNav').addEventListener('click', (e) => {
 async function main() {
   applySettings();
   const ig = $('#ignite');
-  const wantIgnite = db.settings.ignite !== false;
+  // 拉燈：每天第一次打開才有（之後直接進入，點一下畫面就有聲音）
+  let lit = null;
+  try { lit = localStorage.getItem('sandtable.lit'); } catch { /* 沒關係 */ }
+  const todayStr = String(R.tw(Date.now()).d);
+  const wantIgnite = db.settings.ignite !== false && lit !== todayStr;
   const bootP = D.boot().catch((e) => { D.S.err = String(e); });
   if (wantIgnite) {
     ig.hidden = false;
     await new Promise((res) => $('#cord').addEventListener('click', res, { once: true }));
+    try { localStorage.setItem('sandtable.lit', todayStr); } catch { /* 沒關係 */ }
     unlock();
     fx('ignite');
     ig.classList.add('lit');
@@ -193,15 +199,42 @@ async function settle(quiet = false) {
   const res = E.processRun(r, mkt(), now());
   let changed = false;
   await ST.withLock(() => { db = ST.update((x) => { changed = ST.mergeEngine(x, r.id, res); return changed ? undefined : false; }); });
+  // 定期定額：每一期在成交日收盤後用官方收盤價買
+  const r2 = run();
+  if (r2 && (r2.plans || []).length) {
+    await Promise.all([...new Set(r2.plans.map((p) => p.c))].map((c) => Promise.all([D.ensureHist(c), D.ensureK(c)])));
+    const dres = DCA.runDca(r2, mkt(), now());
+    let ch2 = false;
+    if (dres.newFills.length || Object.keys(dres.log).length !== Object.keys(r2.dcaLog || {}).length || dres.stopAt) {
+      await ST.withLock(() => { db = ST.update((x) => { ch2 = ST.mergeDca(x, r2.id, dres); return ch2 ? undefined : false; }); });
+    }
+    if (ch2) { changed = true; announceDca(quiet, r2.dcaLog || {}); }
+  }
   if (changed) { announce(quiet); markTable(); }
+}
+
+function announceDca(quiet, before) {
+  const r = run();
+  if (!r || quiet) return;
+  for (const [k, v] of Object.entries(r.dcaLog || {})) {
+    if (before[k]) continue;
+    const pid = k.split(':')[0];
+    const p = (r.plans || []).find((x) => x.id === pid);
+    if (!p) continue;
+    if (v.st === 'ok') toast(`<div class="slip"><span class="stamp filled new">扣款成功</span><div class="h"><span class="side B">定期定額</span><span class="code">${p.c}</span></div><div class="d">${SH(v.qty)} × ${P(v.px)}</div><div class="m">${MD(v.d)} 收盤價成交</div></div>`, 5200);
+    else if (v.st === 'fail') toast(`<div class="slip"><span class="stamp rejected new">扣款失敗</span><div class="h"><span class="side B">定期定額</span><span class="code">${p.c}</span></div><div class="why">${esc(v.why)}</div></div>`, 6000);
+  }
+  UI.seenDca = true;
 }
 
 function announce(quiet) {
   const r = run();
   if (!r) return;
   const fresh = r.fills.filter((f) => !UI.seen.has(f.id));
+  for (const f of fresh) if (f.sess === 'dca') UI.seen.add(f.id);
   const byO = new Map();
   for (const f of fresh) {
+    if (f.sess === 'dca') continue;
     UI.seen.add(f.id);
     if (!byO.has(f.oid)) byO.set(f.oid, []);
     byO.get(f.oid).push(f);
@@ -520,7 +553,7 @@ function renderOrders() {
       <button data-view="today" aria-pressed="${UI.orderView === 'today'}">今天</button><button data-view="fills" aria-pressed="${UI.orderView === 'fills'}">成交</button><button data-view="all" aria-pressed="${UI.orderView === 'all'}">全部</button></div></div>
       ${openOnes.length ? `<p class="note">掛著 ${openOnes.length} 筆，後台每一輪新行情進來就會自動撮合。</p>` : ''}
       ${list ? (list.map(slip).join('') || `<div class="empty"><span class="brush">桌上沒有紙條</span>${UI.orderView === 'today' ? '今天還沒下單' : '還沒有委託'}</div>`)
-        : (fills.map((f) => `<div class="slip"><span class="stamp filled">成交</span><div class="h"><span class="side ${f.side}">${E.SIDE_NAME[f.side]}</span><span class="code">${f.code}</span><span class="nm">${esc((D.row(f.code) || {}).n || '')}</span></div>
+        : (fills.map((f) => `<div class="slip"><span class="stamp filled">${f.sess === 'dca' ? '定期定額' : '成交'}</span><div class="h"><span class="side ${f.side}">${E.SIDE_NAME[f.side]}</span><span class="code">${f.code}</span><span class="nm">${esc((D.row(f.code) || {}).n || '')}</span></div>
           <div class="d">${SH(f.qty)} × ${P(f.px)} ＝ ${N(f.amt)}</div>
           <div class="m">${MD(f.d)} ${HMS(f.t)} ・ 手續費 ${N(f.fee)}${f.fee !== f.fin ? `（隔天退 ${N(f.fee - f.fin)}）` : ''}${f.tax ? ` ・ 證交稅 ${N(f.tax)}` : ''} ・ ${MD(R.settleDay(D.S.cal, f.d, 2))} 交割</div></div>`).join('') || '<div class="empty"><span class="brush">還沒有成交</span></div>')}
     </div>`;
@@ -640,8 +673,94 @@ function renderPos() {
       </div>
       <p class="note">未實現損益已經扣掉「現在全部賣掉」要付的手續費與證交稅。</p>
     </div>
+    ${dcaHTML(r)}
     ${closed.length ? `<div class="dossier"><div class="tab">已經出清</div><div class="list">${closed.map((h) => `<div class="li tap" data-code="${h.code}"><div class="t"><span class="code">${h.code}</span>${esc((D.row(h.code) || {}).n || '')}</div><div class="v ${cls(h.realized)}">${N(h.realized)}</div></div>`).join('')}</div></div>` : ''}`;
-  el.onclick = (e) => { const p = e.target.closest('[data-code]'); if (p) selectCode(p.dataset.code, true); };
+  el.onclick = (e) => {
+    if (e.target.closest('#dcaAdd')) { openDcaForm(); return; }
+    const st = e.target.closest('[data-dcastop]');
+    if (st) { stopPlan(st.dataset.dcastop); return; }
+    const p = e.target.closest('[data-code]');
+    if (p) selectCode(p.dataset.code, true);
+  };
+}
+
+// ------------------------------------------------------------------ 定期定額
+function dcaHTML(r) {
+  const today = R.tw(now()).d;
+  const plans = r.plans || [];
+  const rows = plans.map((p) => {
+    const nm = (D.row(p.c) || {}).n || '';
+    const ended = p.end && p.end < today;
+    const nx = ended ? null : DCA.nextRun(p, D.S.cal, today);
+    const logs = Object.entries(r.dcaLog || {}).filter(([k]) => k.startsWith(`${p.id}:`)).map(([, v]) => v);
+    const ok = logs.filter((x) => x.st === 'ok');
+    const sh = ok.reduce((s, x) => s + x.qty, 0);
+    const fail = logs.filter((x) => x.st === 'fail').length;
+    return `<div class="li"><div class="t"><span class="code">${p.c}</span>${esc(nm)}</div><div class="v">${N(p.amt)}</div>
+      <div class="s">每月 ${p.days.join('、')} 號 ・ ${p.start > today ? `${MD(p.start)} 起生效` : ended ? `已停扣（${MD(p.end)}）` : nx ? `下次 ${MD(nx.d)}（${WD(nx.d)}）` : ''}${ok.length ? ` ・ 已買 ${ok.length} 期 ${SH(sh)}` : ''}${fail ? ` ・ <span class="warn">失敗 ${fail} 期</span>` : ''}${p.why ? `<br><span class="warn">${esc(p.why)}</span>` : ''}</div>
+      <div class="w">${!ended && !(p.end && p.end >= today && p.stopAt) ? `<button class="btn sm" data-dcastop="${p.id}">停扣</button>` : ''}</div></div>`;
+  }).join('');
+  return `<div class="dossier you"><div class="tab">定期定額 <small>照國泰證券的規則</small></div><div class="act"><button class="btn sm" id="dcaAdd">新增計畫</button></div>
+    ${rows ? `<div class="list">${rows}</div>` : '<div class="empty"><span class="brush">還沒有定期定額</span>可以把你在國泰扣的那一套也搬來練，看長期下來誰比較好</div>'}
+    <p class="note">每月選幾號扣款、遇假日順延、2/30 這種日期那期不買；申請、停扣都要「送出後第 2 個交易日」才生效。用扣款日的收盤價買零股，金額含手續費（2026 年底前每筆 1 元）。可用額度不夠就扣款失敗、不補扣，連續 3 次失敗全部終止。</p></div>`;
+}
+function openDcaForm() {
+  const r = run();
+  if (!r) return;
+  let code = UI.sel;
+  const days = new Set([6]);
+  modal(`<h2>新增定期定額</h2>
+    <div class="field"><label>ETF 代號</label><input id="dCode" value="${esc(code)}" autocomplete="off"></div>
+    <div class="note" id="dName"></div>
+    <div class="field"><label>每月幾號扣款（可以選好幾天）</label><div class="quick" id="dDays">${Array.from({ length: 31 }, (_, i) => i + 1).map((d) => `<button data-day="${d}" style="min-width:34px">${d}</button>`).join('')}</div></div>
+    <div class="field"><label>每期金額（含手續費，百元為單位、最低 100 元）</label><input id="dAmt" type="number" inputmode="numeric" min="100" step="100" value="3000"></div>
+    <p class="note" id="dWhen"></p>
+    <div class="err" id="dErr" hidden></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn ghost" data-close>取消</button><button class="btn brass" id="dOk">送出申請</button></div>`, {
+    onMount: (m, close) => {
+      const paint = () => {
+        const row0 = D.row($('#dCode', m).value.trim().toUpperCase());
+        $('#dName', m).textContent = row0 ? `${row0.n}（${CAT_NAME[row0.k] || ''}）` : '找不到這一檔';
+        $$('#dDays [data-day]', m).forEach((b) => { const on = days.has(Number(b.dataset.day)); b.style.borderColor = on ? 'var(--brass)' : ''; b.style.color = on ? 'var(--brass-2)' : ''; });
+        const c = DCA.cutover(D.S.cal, R.tw(now()).d);
+        $('#dWhen', m).textContent = `今天送出，${MD(c)}（${WD(c)}）起才會照這個設定扣款。`;
+      };
+      $('#dDays', m).onclick = (e) => { const b = e.target.closest('[data-day]'); if (!b) return; const d = Number(b.dataset.day); if (days.has(d)) days.delete(d); else days.add(d); paint(); };
+      $('#dCode', m).oninput = paint;
+      paint();
+      $('#dOk', m).onclick = async () => {
+        const err = $('#dErr', m);
+        code = $('#dCode', m).value.trim().toUpperCase();
+        const amt = Math.floor(Number($('#dAmt', m).value) || 0);
+        if (!D.row(code)) { err.hidden = false; err.textContent = '找不到這一檔 ETF'; return; }
+        if (!days.size) { err.hidden = false; err.textContent = '至少選一天'; return; }
+        if (amt < DCA.DCA_MIN || amt % 100) { err.hidden = false; err.textContent = '金額要以百元為單位、最低 100 元'; return; }
+        let at;
+        try { ({ at } = await D.freshForOrder(code)); } catch { err.hidden = false; err.textContent = '連不上網路，申請沒有送出'; fx('reject'); return; }
+        const start = DCA.cutover(D.S.cal, R.tw(at).d);
+        const plan = { id: ST.newId('p', at), c: code, days: [...days].sort((a, b) => a - b), amt, fee: 1, start, end: null, at };
+        db = ST.update((x) => { const rr = x.runs[r.id]; rr.plans = [...(rr.plans || []), plan]; });
+        close();
+        fx('stamp');
+        note(`定期定額申請已送出：${code} 每月 ${plan.days.join('、')} 號 ${N(amt)} 元，${MD(start)} 起生效`);
+        renderAll();
+      };
+    },
+  });
+}
+async function stopPlan(pid) {
+  const r = run();
+  const p = (r.plans || []).find((x) => x.id === pid);
+  if (!p) return;
+  const ok = await confirmBox('停扣？', `<p>${p.c} 每月 ${p.days.join('、')} 號 ${N(p.amt)} 元。停扣也是送出後第 2 個交易日才生效，在那之前的扣款照常。</p>`, '送出停扣', true);
+  if (!ok) return;
+  let at;
+  try { ({ at } = await D.freshForOrder(p.c)); } catch { note('連不上網路，停扣沒有送出'); fx('reject'); return; }
+  const c = DCA.cutover(D.S.cal, R.tw(at).d);
+  db = ST.update((x) => { const pp = (x.runs[r.id].plans || []).find((y) => y.id === pid); if (pp && (!pp.end || pp.end >= c)) { pp.end = R.addDays(c, -1); pp.stopAt = at; } });
+  fx('cancel');
+  note(`停扣已送出，${MD(c)} 起不再扣款`);
+  renderAll();
 }
 
 // ------------------------------------------------------------------ 戰報
@@ -752,7 +871,7 @@ function settingsBlock() {
     <div class="setting"><div class="l"><b>音效</b><small>沙沙聲、紙條、鼓聲、開收盤的鑼</small></div><input class="switch" type="checkbox" data-set="sound" ${s.sound ? 'checked' : ''}></div>
     <div class="setting"><div class="l"><b>震動</b><small>只有 Android 手機有效</small></div><input class="switch" type="checkbox" data-set="haptics" ${s.haptics ? 'checked' : ''}></div>
     <div class="setting"><div class="l"><b>動態效果</b><small>沙盤起伏、旗子飄動、印章</small></div><input class="switch" type="checkbox" data-set="fx" ${s.fx !== false ? 'checked' : ''}></div>
-    <div class="setting"><div class="l"><b>開機拉燈</b><small>關掉就直接進入（手機要先點一下才有聲音）</small></div><input class="switch" type="checkbox" data-set="ignite" ${s.ignite !== false ? 'checked' : ''}></div>
+    <div class="setting"><div class="l"><b>開機拉燈</b><small>每天第一次打開時拉燈進場；關掉就一律直接進入</small></div><input class="switch" type="checkbox" data-set="ignite" ${s.ignite !== false ? 'checked' : ''}></div>
     <div class="setting"><div class="l"><b>3D 畫質</b><small>手機很燙就調低</small></div><select data-set="quality" class="field" style="margin:0"><option value="auto" ${s.quality === 'auto' ? 'selected' : ''}>自動</option><option value="high" ${s.quality === 'high' ? 'selected' : ''}>高</option><option value="low" ${s.quality === 'low' ? 'selected' : ''}>低</option></select></div>
     <div class="setting"><div class="l"><b>手續費條件</b><small>${Math.round(f.disc * 1000) / 100} 折・整股最低 ${f.min} 元・零股最低 ${f.minOdd} 元・${f.rebate === 'instant' ? '直接折扣' : '日退'}（新開的一局照這個算）</small></div><button class="btn sm" id="feeBtn">修改</button></div>
     <div class="setting"><div class="l"><b>規則說明</b><small>沙盤怎麼判斷成交、哪些地方做不到</small></div><button class="btn sm" id="rulesBtn">打開</button></div>

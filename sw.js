@@ -5,7 +5,7 @@ const SHELL = `sandtable-shell-${BUILD}`;
 const DATA = 'sandtable-data';
 const FONTS = 'sandtable-fonts';
 const SHELL_FILES = ['./', 'index.html', 'styles.css', 'manifest.webmanifest', 'src/app.js', 'src/rules.js', 'src/engine.js', 'src/data.js',
-  'src/store.js', 'src/stats.js', 'src/table3d.js', 'src/charts.js', 'src/fx.js', 'src/guide.js', 'vendor/three.module.min.js',
+  'src/store.js', 'src/stats.js', 'src/dca.js', 'src/table3d.js', 'src/charts.js', 'src/fx.js', 'src/guide.js', 'vendor/three.module.min.js',
   'vendor/three.core.min.js', 'icons/icon-192.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

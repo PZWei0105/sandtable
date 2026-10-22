@@ -266,6 +266,21 @@ export function mkt() {
     },
     market: (c) => (row(c) || {}).m || 'tse',
     cat: (c) => (row(c) || {}).k || 'broad',
+    // 某天的官方收盤價：null＝那天沒有成交（停止交易）、undefined＝資料還沒到
+    close: (c, d) => {
+      const r = row(c);
+      if (r && r.d === d && S.summary && S.summary.asof >= d) return r.p;
+      const kd = kDay(c, d);
+      if (kd && kd.c > 0) return kd.c;
+      const h = S.hist.get(c);
+      if (h && h.d && h.d.length) {
+        const i = h.d.indexOf(d);
+        if (i >= 0) return h.p[i];
+        if (h.d[h.d.length - 1] > d) return null;
+      }
+      if (S.summary && S.summary.asof > d && r && r.d >= d) return null;
+      return undefined;
+    },
     divs: (c) => (S.divs[c] && S.divs[c].d) || [],
     splits: (c) => (S.divs[c] && S.divs[c].s) || [],
     last: (c) => lastPx(c),

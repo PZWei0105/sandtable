@@ -224,6 +224,33 @@ export function createTable(host, opts = {}) {
   rimL.position.set(14, 6, -16);
   scene.add(rimL);
 
+  // 檯燈光裡飄的灰塵（減少動態效果時不放）
+  let dust = null;
+  if (!reduced) {
+    const n = hi ? 420 : 220;
+    const pos = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      const r = Math.sqrt(Math.random()) * 26;
+      const a = Math.random() * Math.PI * 2;
+      pos[i * 3] = Math.cos(a) * r;
+      pos[i * 3 + 1] = 1 + Math.random() * 16;
+      pos[i * 3 + 2] = Math.sin(a) * r;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 32;
+    const cg = cv.getContext('2d');
+    const grd = cg.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grd.addColorStop(0, 'rgba(255,226,170,1)');
+    grd.addColorStop(1, 'rgba(255,226,170,0)');
+    cg.fillStyle = grd;
+    cg.fillRect(0, 0, 32, 32);
+    const tex = new THREE.CanvasTexture(cv);
+    dust = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.16, map: tex, transparent: true, opacity: 0.0, depthWrite: false, blending: THREE.AdditiveBlending, color: 0xffe2aa }));
+    scene.add(dust);
+  }
+
   // 桌面與木框
   let table = null;
   let rim = null;
@@ -614,6 +641,13 @@ export function createTable(host, opts = {}) {
     if (!skip) {
       key.intensity = 2.7 * (lampT * lampT);
       hemi.intensity = 0.25 + 0.75 * lampT;
+      if (dust) {
+        dust.material.opacity = 0.55 * lampT;
+        dust.rotation.y = now * 0.000018;
+        const a = dust.geometry.attributes.position;
+        for (let i = 1; i < a.array.length; i += 3) { a.array[i] += 0.0035; if (a.array[i] > 17) a.array[i] = 1; }
+        a.needsUpdate = true;
+      }
       if (animating) applyHeights(now);
       updateMarkers(now);
       placeCamera();

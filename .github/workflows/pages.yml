@@ -24,6 +24,7 @@ jobs:
         with:
           node-version: '22'
       - run: node tests/engine_test.mjs
+      - run: node tests/dca_test.mjs
       - name: 打包網站（service worker 的版本號＝介面檔案的指紋）
         run: |
           mkdir -p public
