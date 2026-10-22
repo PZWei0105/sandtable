@@ -29,7 +29,7 @@ const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 export const SIDE_NAME = { B: '買進', S: '賣出' };
 export const TYPE_NAME = { L: '限價', M: '市價', C: '收盤價' };
 export const ST_NAME = {
-  wait: '委託中', queued: '預約中', live: '委託中', part: '部分成交', filled: '全部成交',
+  wait: '委託中', queued: '預約中', live: '委託中', part: '部分成交', filled: '全部成交', cancelling: '刪單中',
   cancelled: '已刪單', expired: '未成交', rejected: '退單',
 };
 
@@ -94,7 +94,7 @@ export function advance(o, prog0, mods, mkt, nowMs) {
     if (!(qty > 0)) return;
     out.fills.push({ t, px: r2(px), qty, how });
     prog.filled += qty;
-    if (remain(t) <= 0) prog.full = true;      // 這一筆把委託全部成交了（之後的刪單無效）
+    if (prog.filled >= qtyAt(o, mods, Infinity).q) prog.full = true;   // 全部成交了（之後的刪單無效）
   };
   const finish = (st, why, t) => {
     prog.st = 'done';
@@ -159,6 +159,11 @@ export function advance(o, prog0, mods, mkt, nowMs) {
   // 市價單沒成交的部分，掛在漲停價（買）／跌停價（賣）等；沒有漲跌幅限制的就不設價
   const effP = limitP != null ? limitP : (isB ? up : down);
   const better = (px) => (effP == null ? true : isB ? px < effP - 1e-9 : px > effP + 1e-9);   // 嚴格穿價
+  // 送單當下（照你看得到的最新五檔）是不是「馬上能成交」的單。不是的話，之後成交一律用你的委託價（掛著的單被吃掉），
+  // 不會因為下一筆快照剛好跌更深而用更好的價格成交（那樣等於偷看了之後的行情）。
+  const refA = kind === 'odd' ? o.ref && o.ref.oa1 : o.ref && o.ref.a1;
+  const refB = kind === 'odd' ? o.ref && o.ref.ob1 : o.ref && o.ref.b1;
+  const marketable = o.type === 'M' || (limitP != null && (isB ? isNum(refA) && refA <= limitP + 1e-9 : isNum(refB) && refB >= limitP - 1e-9));
   const firstMatch = atTW(D, kind === 'odd' ? w.oddFirst : w.regOpen);
   const auctionAt = atTW(D, w.regAuction);    // 13:25 收盤前集合競價開始
   const closeAt = atTW(D, w.regClose);        // 13:30 收盤
@@ -205,15 +210,19 @@ export function advance(o, prog0, mods, mkt, nowMs) {
         Object.assign(prog, { st: 'live', act: o.at, L: -Infinity, H: Infinity, zt0: Infinity, cut: Infinity });
       } else {
         if (!bandOk(t1.t)) return out;
-        const q = remain(t1.t);
-        if (q <= 0) { finish('cancelled', '已刪單', t1.t); return out; }
+        // 委託送出就到了交易所；在下一筆快照之前送的刪單、減量，如果那筆快照顯示已經能成交，一律算「成交在先」
+        // （看即時行情發現要虧了才刪單，在真實世界是來不及的）
+        const q = remain(o.at + 1);
         const book = isB ? t1.a : t1.b;
         const noBook = !(t1.a && t1.a.length) && !(t1.b && t1.b.length);
         let got = { fills: [], filled: 0 };
-        if (book && book.length) got = walkBook(book, o.side, q, effP);
+        if (book && book.length) {
+          got = walkBook(book, o.side, q, effP);
+          if (!marketable) got.fills = got.fills.map((f) => ({ ...f, px: limitP }));
+        }
         else if (noBook && isNum(t1.z) && isNum(t1.zt) && t1.zt > o.at && better(t1.z)) {
-          // 這一筆完全沒有五檔資料（資料缺漏）：委託之後有人用比你更好的價格成交，才用那個價格成交
-          got = { fills: [{ px: t1.z, qty: q }], filled: q };
+          // 這一筆完全沒有五檔資料（資料缺漏）：委託之後有人用比你更好的價格成交，才算成交
+          got = { fills: [{ px: marketable || limitP == null ? t1.z : limitP, qty: q }], filled: q };
         }
         // 對方完全沒有掛單（例如漲停鎖死沒人賣）：吃不到，掛著等
         let n = roundLot(got.filled, o.sess);
@@ -243,7 +252,8 @@ export function advance(o, prog0, mods, mkt, nowMs) {
     for (const x of ticksAll) {
       if (!(x.t > prog.cut)) continue;
       if (x.t >= closeAt) break;                 // 收盤後的快照交給收盤撮合
-      const q = remain(x.t);
+      // 這一筆快照之前（上一筆之後）送的刪單、減量：如果這一筆顯示價格已經穿過，算成交在先
+      const q = remain(prog.cut + 1);
       if (q <= 0) break;
       prog.cut = x.t;
       const book = x.t < auctionAt ? (isB ? x.a : x.b) : null;   // 13:25 以後是集合競價的委託簿，不拿來撮合
@@ -252,6 +262,7 @@ export function advance(o, prog0, mods, mkt, nowMs) {
           const got = walkBook(book, o.side, q, effP);
           let left = roundLot(got.filled, o.sess);
           for (const f of got.fills) { const k = Math.min(left, f.qty); if (k > 0) fill(x.t, f.px, k, 'rest'); left -= k; }
+          prog.filledAt = x.t;
         }
       } else {
         const through = (isNum(x.z) && isNum(x.zt) && x.zt > prog.zt0 && better(x.z))
@@ -264,7 +275,7 @@ export function advance(o, prog0, mods, mkt, nowMs) {
           if (n > 0) fill(x.t, limitP, n, 'book');
         }
       }
-      if (remain(x.t) <= 0) break;
+      if (remainingAt(o, mods, x.t + 1, prog.filled) <= 0) break;
     }
     // 全部成交，或在收盤前就刪單／減量到零
     if (prog.full) { finish('filled', '', out.fills.length ? out.fills[out.fills.length - 1].t : prog.cut); return out; }
@@ -272,6 +283,8 @@ export function advance(o, prog0, mods, mkt, nowMs) {
     if (remain(tEval) <= 0) {
       const { cancelled } = qtyAt(o, mods, tEval);
       const m = mods.filter((x) => x.oid === o.id && x.at < tEval).pop();
+      // 刪單、減量要等下一筆行情確認：那一筆如果顯示早就成交了，成交算數
+      if (m && prog.cut < m.at && nowMs < closeAt) return out;
       if (!cancelled && prog.filled > 0) finish('filled', '減量後全部成交', m ? m.at : prog.cut);
       else finish('cancelled', prog.filled > 0 ? `已刪單（之前已成交 ${prog.filled} 股）` : '已刪單', m ? m.at : prog.cut);
       return out;
@@ -359,6 +372,7 @@ export function orderStatus(run, o) {
   const filled = (run.fills || []).filter((f) => f.oid === o.id).reduce((s, f) => s + f.qty, 0);
   const p = (run.prog || {})[o.id];
   if (fin) return { st: fin.st === 'part' ? 'expired' : fin.st, why: fin.why, filled, t: fin.t };
+  if ((run.mods || []).some((m) => m.oid === o.id && m.kind === 'cancel')) return { st: 'cancelling', filled };
   if (filled > 0) return { st: 'part', filled };
   return { st: p && p.st === 'live' ? 'live' : o.phase === 'reserve' ? 'queued' : 'wait', filled };
 }
@@ -465,8 +479,10 @@ export function ledger(run, mkt, nowMs) {
   for (const o of run.orders || []) {
     const st = orderStatus(run, o);
     if (['filled', 'cancelled', 'expired', 'rejected'].includes(st.st)) continue;
-    const { q, cancelled } = qtyAt(o, run.mods || [], Infinity);
-    const left = cancelled ? 0 : Math.max(0, q - st.filled);
+    // 刪單還沒確認之前，圈存照樣圈著（可能成交在先）
+    const { q } = qtyAt(o, [], Infinity);
+    const qq = Math.min(q, qtyAt(o, (run.mods || []).filter((m) => m.kind === 'reduce'), Infinity).q);
+    const left = Math.max(0, (st.st === 'cancelling' ? o.qty : qq) - st.filled);
     if (left <= 0) continue;
     if (o.side === 'B') reserved += reserveOf(o, left, run.fees);
     else lockedSh.set(o.code, (lockedSh.get(o.code) || 0) + left);

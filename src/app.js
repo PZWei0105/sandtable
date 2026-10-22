@@ -339,7 +339,7 @@ function markTable() {
   if (r) {
     const Lg = L(r);
     UI.table.setHeld(Lg.holdings.filter((h) => h.sh > 0).map((h) => h.code));
-    UI.table.setPending([...new Set(r.orders.filter((o) => { const s = E.orderStatus(r, o).st; return ['wait', 'queued', 'live', 'part'].includes(s); }).map((o) => o.code))]);
+    UI.table.setPending([...new Set(r.orders.filter((o) => { const s = E.orderStatus(r, o).st; return ['wait', 'queued', 'live', 'part', 'cancelling'].includes(s); }).map((o) => o.code))]);
   } else { UI.table.setHeld([]); UI.table.setPending([]); }
   UI.table.select(UI.sel);
 }
@@ -358,7 +358,7 @@ function renderAll() {
   const wide = window.matchMedia('(min-width:1100px)').matches;
   if (wide) { renderTablePane(); renderQuote(); renderOrders(); renderPos(); if (document.body.classList.contains('wide-report')) renderReport(); } else render(UI.tab);
   const r = run();
-  const open = r ? r.orders.filter((o) => ['wait', 'queued', 'live', 'part'].includes(E.orderStatus(r, o).st)).length : 0;
+  const open = r ? r.orders.filter((o) => ['wait', 'queued', 'live', 'part', 'cancelling'].includes(E.orderStatus(r, o).st)).length : 0;
   const b = $('#badgeOrders');
   b.hidden = !open;
   b.textContent = open;
@@ -525,7 +525,7 @@ function renderOrders() {
   const today = R.tw(now()).d;
   const all = [...r.orders].sort((a, b) => b.at - a.at);
   const st = (o) => E.orderStatus(r, o);
-  const openOnes = all.filter((o) => ['wait', 'queued', 'live', 'part'].includes(st(o).st));
+  const openOnes = all.filter((o) => ['wait', 'queued', 'live', 'part', 'cancelling'].includes(st(o).st));
   const todays = all.filter((o) => o.day === today || R.tw(o.at).d === today || openOnes.includes(o));
   const list = UI.orderView === 'today' ? todays : UI.orderView === 'fills' ? null : all.slice(0, 120);
   const fills = [...r.fills].sort((a, b) => b.t - a.t).slice(0, 120);
@@ -535,7 +535,7 @@ function renderOrders() {
     const q = fs.reduce((a, f) => a + f.qty, 0);
     const avg = q ? fs.reduce((a, f) => a + f.amt, 0) / q : null;
     const nm = (D.row(o.code) || {}).n || '';
-    const live = ['wait', 'queued', 'live', 'part'].includes(s.st);
+    const live = ['wait', 'queued', 'live', 'part', 'cancelling'].includes(s.st);
     const canPx = live && o.sess === 'reg' && o.type === 'L' && o.tif === 'ROD';
     const why = (r.finals[o.id] || {}).why;
     const nt = (r.notes || {})[o.id];
@@ -545,7 +545,8 @@ function renderOrders() {
       <div class="m">委託 ${MD(R.tw(o.at).d)} ${HMS(o.at)}${o.day !== R.tw(o.at).d ? `（${MD(o.day)} 的預約單）` : ''}${q ? ` ・ 已成交 ${SH(q)} 均價 ${P(avg)}` : ''}</div>
       ${why ? `<div class="why">${esc(why)}</div>` : ''}
       ${nt && nt.t ? `<div class="m">理由：${esc(nt.t)}</div>` : ''}
-      ${live ? `<div class="acts"><button class="btn sm" data-act="cancel">刪單</button>${o.qty - q > (o.sess === 'reg' ? 1000 : 1) ? '<button class="btn sm" data-act="reduce">減量</button>' : ''}${canPx ? '<button class="btn sm" data-act="reprice">改價</button>' : ''}</div>` : ''}
+      ${s.st === 'cancelling' ? '<div class="m">刪單已送出，等下一筆行情確認（如果那之前已經成交，成交算數）</div>' : ''}
+      ${live && s.st !== 'cancelling' ? `<div class="acts"><button class="btn sm" data-act="cancel">刪單</button>${o.qty - q > (o.sess === 'reg' ? 1000 : 1) ? '<button class="btn sm" data-act="reduce">減量</button>' : ''}${canPx ? '<button class="btn sm" data-act="reprice">改價</button>' : ''}</div>` : ''}
     </div>`;
   };
   el.innerHTML = `
@@ -581,11 +582,12 @@ async function modOrder(o, kind, qty) {
   await settle(true);
   const r = run();
   const s = E.orderStatus(r, r.orders.find((x) => x.id === o.id));
+  if (s.st === 'cancelling') { note('這筆已經送出刪單，正在等下一筆行情確認'); return false; }
   if (!['wait', 'queued', 'live', 'part'].includes(s.st)) { note(`來不及了：這筆已經「${E.ST_NAME[s.st]}」`); renderAll(); return false; }
   const m = { id: ST.newId('m', at), oid: o.id, at, kind, qty: qty || 0 };
   db = ST.update((x) => { x.runs[r.id].mods.push(m); });
   fx(kind === 'cancel' ? 'cancel' : 'stamp');
-  note(kind === 'cancel' ? `刪單已送出（${HMS(at)}）。如果在這之前已經成交，成交照算。` : `減量 ${SH(qty)} 已送出（${HMS(at)}）`);
+  note(kind === 'cancel' ? `刪單已送出（${HMS(at)}），等下一筆行情確認；如果那之前價格已經穿過你的委託價，算成交在先。` : `減量 ${SH(qty)} 已送出（${HMS(at)}），下一筆行情之後生效`);
   await settle();
   renderAll();
   updateTable(false);
@@ -951,7 +953,7 @@ function importDialog() {
 async function endDialog() {
   const r = run();
   if (!r) return;
-  const open = r.orders.filter((o) => ['wait', 'queued', 'live', 'part'].includes(E.orderStatus(r, o).st)).length;
+  const open = r.orders.filter((o) => ['wait', 'queued', 'live', 'part', 'cancelling'].includes(E.orderStatus(r, o).st)).length;
   const ok = await confirmBox('封存這一局？', `<p>${esc(r.name)} 會結算目前的總資產、和 0050 的比較，永遠留在戰役紀錄裡（不能刪、不能再交易）。${open ? `<br><b class="warn">還有 ${open} 筆委託掛著，會一起作廢。</b>` : ''}</p><p>之後可以馬上開新的一局，從那一刻的真實行情開始。</p>`, '封存', true);
   if (!ok) return;
   await renderReport();
@@ -1232,6 +1234,13 @@ function openTicket(code, side) {
   sh.querySelector('#tQty').blur();
 }
 
+/** 送單當下看得到的價格（之後判斷「是不是一送出就能成交的單」） */
+function refOf(code, q) {
+  const qo = D.quoteOf(code, 'odd');
+  const p1 = (x, side) => (x && x[side] && x[side][0] ? x[side][0][0] : null);
+  return { z: q ? q.z : null, a1: p1(q, 'a'), b1: p1(q, 'b'), oa1: p1(qo, 'a'), ob1: p1(qo, 'b'), qAt: D.S.quotes ? D.S.quotes.at : null };
+}
+
 /** 真正送單：拿伺服器時間、用最新的行情和帳戶再檢查一次、存起來 */
 async function placeOrder(st, opt) {
   let at;
@@ -1268,7 +1277,7 @@ async function placeOrder(st, opt) {
   const resPx = type === 'M' ? (st.side === 'B' ? (lim.up || R.snapTick((q && q.z ? q.z : D.lastPx(st.code)) * 1.2, 1)) : null) : null;
   const order = {
     id: ST.newId('o', at), at, code: st.code, side: st.side, sess: w.sess, type, tif, px, qty: st.qty, day: w.day, phase: w.phase,
-    resPx, ref: { z: q ? q.z : null, a1: q && q.a && q.a[0] ? q.a[0][0] : null, b1: q && q.b && q.b[0] ? q.b[0][0] : null, qAt: D.S.quotes ? D.S.quotes.at : null },
+    resPx, ref: refOf(st.code, q),
     prev: st.prev || null,
   };
   if (st.side === 'B') {

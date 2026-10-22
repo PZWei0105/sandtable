@@ -249,7 +249,7 @@ a { color: var(--brass-2); }
   border: 2px solid currentColor; border-radius: 4px; transform: rotate(-7deg); opacity: 0.88; letter-spacing: 0.08em;
 }
 .stamp.filled { color: var(--stamp-red); }
-.stamp.live, .stamp.wait, .stamp.queued, .stamp.part { color: var(--stamp-blue); }
+.stamp.live, .stamp.wait, .stamp.queued, .stamp.part, .stamp.cancelling { color: var(--stamp-blue); }
 .stamp.cancelled, .stamp.expired { color: #6d6250; }
 .stamp.rejected { color: #b4560f; }
 .stamp.new { animation: stampIn 0.42s cubic-bezier(.2, 1.6, .4, 1); }

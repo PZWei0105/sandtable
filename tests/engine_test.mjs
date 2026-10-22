@@ -96,11 +96,16 @@ test('五檔吃單：依價格由好到壞', () => {
   const r = walkBook([[100, 2000], [100.05, 5000], [100.1, 9000]], 'B', 3000, 100.05);
   assert.deepEqual(r.fills, [{ px: 100, qty: 2000 }, { px: 100.05, qty: 1000 }]);
 });
-test('盤中限價買：下一筆快照的賣方五檔能吃就成交（價格用對方的）', () => {
+test('盤中限價買（送單時就能成交）：下一筆快照的賣方五檔能吃就成交，價格用對方的', () => {
   const m = mk({ ticks: { '0050': { [D]: { reg: [tk(1003, 0, { a: [[99.9, 2000], [100, 5000]], l: 99.8, h: 100.2, z: 99.95, zt: T(1002) })] } } } });
-  const r = run1(order({ qty: 3000 }), m, T(1004));
+  const r = run1(order({ qty: 3000, ref: { a1: 99.95 } }), m, T(1004));
   assert.deepEqual(r.fills.map((f) => [f.px, f.qty]), [[99.9, 2000], [100, 1000]]);
   assert.equal(r.done.st, 'filled');
+});
+test('送單時還不能成交的限價單：之後就算跌更深，也只用委託價成交（不能偷到更好的價格）', () => {
+  const m = mk({ ticks: { '0050': { [D]: { reg: [tk(1003, 0, { a: [[99.6, 2000], [99.7, 5000]], l: 99.5, h: 100.2, z: 99.6, zt: T(1002) })] } } } });
+  const r = run1(order({ qty: 3000, ref: { a1: 100.2 } }), m, T(1004));
+  assert.deepEqual(r.fills.map((f) => [f.px, f.qty]), [[100, 2000], [100, 1000]]);
 });
 test('委託前的快照不能拿來成交（不能看答案）', () => {
   const m = mk({ ticks: { '0050': { [D]: { reg: [tk(959, 0, { a: [[99, 9000]] })] } } } });
@@ -193,11 +198,27 @@ test('收盤價還沒出來：先不判定', () => {
   const r = run1(order(), mk({ ticks: { '0050': { [D]: { reg: ticks } } } }), T(1335));
   assert.equal(r.done, null);
 });
-test('刪單在成交快照之前：不成交', () => {
+test('刪單送出後、下一筆快照顯示早就能成交：成交在先（看到要虧才刪單是來不及的）', () => {
   const ticks = [tk(1003, 0, { a: [[99.9, 2000]] })];
-  const r = run1(order(), mk({ ticks: { '0050': { [D]: { reg: ticks } } } }), T(1004), [{ oid: 'o1', at: T(1001), kind: 'cancel' }]);
+  const r = run1(order({ ref: { a1: 99.95 } }), mk({ ticks: { '0050': { [D]: { reg: ticks } } } }), T(1004), [{ oid: 'o1', at: T(1001), kind: 'cancel' }]);
+  assert.equal(r.fills.length, 1);
+  assert.equal(r.done.st, 'filled');
+});
+test('刪單：下一筆快照沒有成交的跡象，刪單才確定', () => {
+  const ticks = [tk(1003, 0, { a: [[100.1, 2000]], l: 99.95, h: 100.3, z: 100.1, zt: T(1002) }), tk(1008, 0, { a: [[100.1, 2000]], l: 99.95, z: 100.1, zt: T(1007) })];
+  const m = mk({ ticks: { '0050': { [D]: { reg: ticks } } } });
+  const mods = [{ oid: 'o1', at: T(1005), kind: 'cancel' }];
+  let r = run1(order(), m, T(1006), mods);
+  assert.equal(r.done, null, '刪單送出了，但下一筆行情還沒來：刪單中');
+  r = advance(order(), r.prog, mods, m, T(1009));
   assert.equal(r.fills.length, 0);
   assert.equal(r.done.st, 'cancelled');
+});
+test('刪單之後、下一筆快照顯示價格已經穿過：成交在先', () => {
+  const ticks = [tk(1003, 0, { a: [[100.1, 2000]], l: 99.95, h: 100.3, z: 100.1, zt: T(1002) }), tk(1008, 0, { a: [[100.1, 2000]], l: 99.8, z: 100.1, zt: T(1007) })];
+  const r = run1(order(), mk({ ticks: { '0050': { [D]: { reg: ticks } } } }), T(1009), [{ oid: 'o1', at: T(1005), kind: 'cancel' }]);
+  assert.deepEqual(r.fills.map((f) => [f.px, f.how]), [[100, 'through']]);
+  assert.equal(r.done.st, 'filled');
 });
 test('刪單在成交之後：成交算數，刪單失敗', () => {
   const ticks = [tk(1003, 0, { a: [[99.9, 2000]] })];
@@ -205,11 +226,13 @@ test('刪單在成交之後：成交算數，刪單失敗', () => {
   assert.equal(r.fills.length, 1);
   assert.equal(r.done.st, 'filled');
 });
-test('減量：最多成交減量後的數量', () => {
-  const ticks = [tk(1003, 0, { a: [[99.9, 9000]] })];
-  const r = run1(order({ qty: 3000 }), mk({ ticks: { '0050': { [D]: { reg: ticks } } } }), T(1004), [{ oid: 'o1', at: T(1001), kind: 'reduce', qty: 1000 }]);
-  assert.equal(r.fills[0].qty, 2000);
-  assert.equal(r.done.st, 'filled');
+test('減量：下一筆快照之後才生效；之後成交最多到減量後的數量', () => {
+  const ticks = [tk(1003, 0, { a: [[100.1, 9000]], l: 99.95, z: 100.1, zt: T(1002) }), tk(1008, 0, { a: [[99.9, 9000]], l: 99.95, z: 100.1, zt: T(1002) })];
+  const r = run1(order({ qty: 3000 }), mk({ ticks: { '0050': { [D]: { reg: ticks } } } }), T(1009), [{ oid: 'o1', at: T(1004), kind: 'reduce', qty: 1000 }]);
+  assert.equal(r.fills.reduce((s, f) => s + f.qty, 0), 3000, '減量在 10:04，10:08 那筆快照的區間內 → 成交在先');
+  const r2 = run1(order({ qty: 3000 }), mk({ ticks: { '0050': { [D]: { reg: ticks } } } }), T(1009), [{ oid: 'o1', at: T(1001), kind: 'reduce', qty: 1000 }]);
+  assert.equal(r2.fills.reduce((s, f) => s + f.qty, 0), 2000, '減量在第一筆快照之前就確定了');
+  assert.equal(r2.done.st, 'filled');
 });
 test('IOC：吃得到的成交、其餘取消；FOK：不夠就整筆取消', () => {
   const ticks = [tk(1003, 0, { a: [[99.9, 1000]] })];
@@ -224,7 +247,7 @@ test('IOC：吃得到的成交、其餘取消；FOK：不夠就整筆取消', ()
 test('盤中零股：用零股的五檔，量以股計', () => {
   const ticks = [tk(1003, 0, { a: [[108.4, 150], [108.45, 500]] })];
   const m = mk({ ticks: { '0050': { [D]: { odd: ticks, reg: [] } } } });
-  const r = run1(order({ sess: 'odd', qty: 300, px: 108.45 }), m, T(1004));
+  const r = run1(order({ sess: 'odd', qty: 300, px: 108.45, ref: { oa1: 108.4 } }), m, T(1004));
   assert.deepEqual(r.fills.map((f) => [f.px, f.qty]), [[108.4, 150], [108.45, 150]]);
 });
 test('盤後零股：用證交所公布的成交價，嚴格比較', () => {
