@@ -422,7 +422,9 @@ function sparkSVG(code, w = 120, h = 34, fit = false) {
   const d = sp.pts.map((x, i) => `${i ? 'L' : 'M'}${X(x[0]).toFixed(1)} ${Y(x[1]).toFixed(1)}`).join(' ');
   const area = `${d} L${X(last[0]).toFixed(1)} ${h} L${X(sp.pts[0][0]).toFixed(1)} ${h} Z`;
   const ref = isNum(sp.ref) ? `<line class="ref" x1="0" x2="${w}" y1="${Y(sp.ref).toFixed(1)}" y2="${Y(sp.ref).toFixed(1)}"/>` : '';
-  return `<svg class="spk" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${ref}<path class="ar" d="${area}" fill="${col}"/><path class="ln" d="${d}" stroke="${col}" style="filter:drop-shadow(0 0 3px ${col})"/><circle cx="${X(last[0]).toFixed(1)}" cy="${Y(last[1]).toFixed(1)}" r="2.6" fill="${col}" style="filter:drop-shadow(0 0 4px ${col})"/></svg>`;
+  // 清單裡一次幾百張：小張的不加發光濾鏡（手機捲動才順）
+  const glow = (r) => (w >= 120 ? ` style="filter:drop-shadow(0 0 ${r}px ${col})"` : '');
+  return `<svg class="spk" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${ref}<path class="ar" d="${area}" fill="${col}"/><path class="ln" d="${d}" stroke="${col}"${glow(3)}/><circle cx="${X(last[0]).toFixed(1)}" cy="${Y(last[1]).toFixed(1)}" r="2.6" fill="${col}"${glow(4)}/></svg>`;
 }
 const STAR = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4L2.8 9.5l6.4-.8z"/></svg>';
 const STAR_O = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4L2.8 9.5l6.4-.8z"/></svg>';
@@ -543,16 +545,21 @@ function renderTablePane() {
 // ------------------------------------------------------------------ 看盤：全部 ETF 清單（類別、搜尋、排序）＋單檔
 const QCATS = [['all', '全部'], ['watch', '自選'], ['held', '持有'], ['broad', '市值型'], ['div', '高股息'], ['theme', '產業主題'], ['active', '主動式'], ['overseas', '海外股票'], ['bond', '債券'], ['lev', '槓桿型'], ['inv', '反向型'], ['fut', '期貨商品']];
 function renderQuoteList(el) {
+  // 行情更新時整個清單重畫：正在打字的搜尋框要保留焦點和游標
+  const prevInp = $('#qSearch', el);
+  const typing = prevInp && document.activeElement === prevInp ? [prevInp.selectionStart, prevInp.selectionEnd] : null;
   const rows = D.S.summary ? D.S.summary.etfs : [];
   const r = run();
   const Lg = r ? L(r) : null;
   const heldSet = new Set(Lg ? Lg.holdings.filter((h) => h.sh > 0).map((h) => h.code) : []);
   const watch = db.settings.watch || [];
   const cat = UI.qcat || 'all';
-  const qq = (UI.q || '').toUpperCase();
+  const qq = (UI.q || '').trim().toUpperCase();
   const count = (k) => (k === 'all' ? rows.length : k === 'watch' ? watch.length : k === 'held' ? heldSet.size : rows.filter((x) => x.k === k).length);
   let list = rows.filter((x) => (cat === 'all' ? true : cat === 'watch' ? watch.includes(x.c) : cat === 'held' ? heldSet.has(x.c) : x.k === cat));
-  if (qq) list = list.filter((x) => x.c.toUpperCase().includes(qq) || x.n.toUpperCase().includes(qq));
+  // 搜尋也認類別：打「高股息」「債」「市值」會把那一類全部列出來（名字裡沒有這幾個字的也算）
+  const catHit = qq ? Object.entries(CAT_NAME).filter(([, n]) => n.includes(qq) || (qq.length >= 2 && qq.includes(n))).map(([k]) => k) : [];
+  if (qq) list = list.filter((x) => x.c.toUpperCase().includes(qq) || x.n.toUpperCase().includes(qq) || catHit.includes(x.k));
   const sort = UI.qsort || 'val';
   const enriched = list.map((x) => ({ x, ch: D.changeOf(x.c), val: D.valueOf(x.c) }));
   if (sort === 'pct') enriched.sort((a, b) => (b.ch.pct ?? -1e9) - (a.ch.pct ?? -1e9));
@@ -566,7 +573,8 @@ function renderQuoteList(el) {
     <div class="qbar"><div class="seg">${[['val', '成交值'], ['pct', '漲幅'], ['pctd', '跌幅'], ['code', '代號']].map(([k, n]) => `<button data-sort="${k}" aria-pressed="${sort === k}">${n}</button>`).join('')}</div><span class="cnt">${enriched.length} 檔</span></div>
     <div class="dossier" style="padding:4px 12px"><div class="list">${enriched.map(({ x, ch }) => `<div class="qrow ${x.c === UI.sel ? 'sel' : ''}" data-code="${x.c}"><div class="t"><b>${x.c}${heldSet.has(x.c) ? '<i class="tag you">持有</i>' : ''}</b><span>${esc(x.n)}</span></div>${sparkSVG(x.c, 64, 26, true)}<div class="r"><span class="p ${cls(ch.pct)}">${P(ch.px)}</span>${PILL(ch.pct)}</div>${starBtn(x.c)}</div>`).join('') || `<div class="empty"><span class="brush">${cat === 'watch' ? '還沒有自選' : '找不到'}</span>${cat === 'watch' ? '在清單裡點星號，就會出現在這裡和首頁' : '換個關鍵字試試'}</div>`}</div></div>`;
   const inp = $('#qSearch', el);
-  inp.oninput = () => { UI.q = inp.value.trim(); const pos = inp.selectionStart; renderQuote().then(() => { const i2 = $('#qSearch'); if (i2) { i2.focus(); i2.setSelectionRange(pos, pos); } }); };
+  if (typing) { inp.focus(); try { inp.setSelectionRange(typing[0], typing[1]); } catch { /* 有些輸入框不支援 */ } }
+  inp.oninput = () => { UI.q = inp.value; renderQuote(); };
   el.onclick = (e) => {
     const st = e.target.closest('[data-star]');
     if (st) { toggleWatch(st.dataset.star); renderQuote(); return; }
