@@ -274,6 +274,7 @@ function announce(quiet) {
       toast(`<div class="slip"><span class="stamp filled new">成交</span><div class="h"><span class="side ${o.side}">${E.SIDE_NAME[o.side]}</span><span class="code">${o.code}</span><span class="nm">${esc(name)}</span></div><div class="d">${SH(q)} × 均價 ${P(amt / q)}</div><div class="m">${HMS(fs[fs.length - 1].t)} 成交回報</div></div>`, 5200);
     }
     if (byO.size) fx('fill');
+    if (UI.table && UI.table.ping) for (const oid of byO.keys()) { const o = r.orders.find((x) => x.id === oid); if (o) UI.table.ping(o.code, 'fill'); }
   }
   for (const [oid, fin] of Object.entries(r.finals || {})) {
     if (UI.seenFinal.has(oid)) continue;
@@ -489,6 +490,9 @@ function renderTablePane() {
   renderHud();
   const sel = D.row(UI.sel);
   const ch = D.changeOf(UI.sel);
+  // 新行情進來、價格變了：大字閃一下（紅漲綠跌）
+  const tflash = UI.lastTgt && UI.lastTgt.code === UI.sel && isNum(UI.lastTgt.px) && isNum(ch.px) && ch.px !== UI.lastTgt.px ? (ch.px > UI.lastTgt.px ? 'flash-up' : 'flash-down') : '';
+  UI.lastTgt = { code: UI.sel, px: ch.px };
   const items = tableItems().filter((x) => isNum(x.pct));
   const movers = [...items].sort((a, b) => b.pct - a.pct);
   const top = movers.slice(0, 5);
@@ -514,7 +518,7 @@ function renderTablePane() {
   el.innerHTML = `
     ${sel ? `<div class="dossier only-m"><div class="tab">選定目標 <small>${esc(CAT_NAME[sel.k] || '')}</small></div><div class="act">${starBtn(sel.c)}</div>
       <div class="target"><div><div class="cd">${sel.c}</div><div class="nm">${esc(sel.n)}</div></div>
-        <div><div class="px ${cls(ch.pct)}" id="tgtPx">${P(ch.px)}</div><div class="ch ${cls(ch.pct)}">${isNum(ch.ch) ? `${ch.ch > 0 ? '▲' : ch.ch < 0 ? '▼' : ''}${Math.abs(ch.ch).toFixed(2)}` : ''} ${PCT(ch.pct)}</div></div>
+        <div><div class="px ${cls(ch.pct)} ${tflash}" id="tgtPx">${P(ch.px)}</div><div class="ch ${cls(ch.pct)}">${isNum(ch.ch) ? `${ch.ch > 0 ? '▲' : ch.ch < 0 ? '▼' : ''}${Math.abs(ch.ch).toFixed(2)}` : ''} ${PCT(ch.pct)}</div></div>
         ${sparkSVG(sel.c, 320, 46)}</div>
       <div class="row" style="margin-top:12px"><button class="btn grow" data-go="quote">看盤</button><button class="btn buy grow" data-trade="B">買進</button><button class="btn sell grow" data-trade="S">賣出</button></div></div>` : ''}
     <div class="dossier"><div class="tab">自選 <small>${watch.length} 檔・點星號加減</small></div>
@@ -1491,6 +1495,7 @@ async function placeOrder(st, opt) {
   });
   if (err) return reject(err);
   fx('send');
+  if (UI.table && UI.table.ping) UI.table.ping(order.code, 'you');
   toast(`<div class="slip"><span class="stamp ${w.phase === 'reserve' ? 'queued' : 'wait'} new">${w.phase === 'reserve' ? '預約' : '已送出'}</span><div class="h"><span class="side ${order.side}">${E.SIDE_NAME[order.side]}</span><span class="code">${order.code}</span></div><div class="d">${orderLine(order)}</div><div class="m">伺服器時間 ${HMS(at)} ${w.phase === 'continuous' ? '・ 下一筆行情到達交易所' : `・ ${esc(w.note)}`}</div></div>`, 4600);
   await settle();
   renderAll();

@@ -390,6 +390,23 @@ export function createTable(host, opts = {}) {
   }
   let beamCodes = [];
 
+  // 脈衝波：送單（寶藍）、成交（金）時從那一格擴散出去
+  const pings = [];
+  function ping(code, kind = 'fill') {
+    if (!cells.has(code)) return;
+    const col = kind === 'you' ? C.you : C.goldHi;
+    for (let k = 0; k < 2; k++) {
+      const m = new THREE.Mesh(hexRingGeo, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+      m.rotation.x = -Math.PI / 2;
+      m.rotation.z = Math.PI / 6;
+      m.userData = { code, t0: performance.now() + k * 220 };
+      scene.add(m);
+      pings.push(m);
+    }
+    lastAct = performance.now();
+    kick();
+  }
+
   // 浮在空中的光點（減少動態效果時不放）
   let sparks = null;
   if (!reduced) {
@@ -609,6 +626,17 @@ export function createTable(host, opts = {}) {
       m.position.set(p.x + (flags.has(c) ? 0.75 * zs : 0), heightNow(c, now) + 0.7 * zs + bob, p.z);
       m.scale.set(0.95 * zs, 0.95 * zs, 1);
     }
+    for (let i = pings.length - 1; i >= 0; i--) {
+      const m = pings[i];
+      const p = cells.get(m.userData.code);
+      const a = (now - m.userData.t0) / 1300;
+      if (!p || a >= 1 || reduced) { scene.remove(m); m.material.dispose(); pings.splice(i, 1); continue; }
+      if (a < 0) { m.material.opacity = 0; continue; }
+      const k = (1 + a * 3.8) * zs;
+      m.position.set(p.x, heightNow(m.userData.code, now) + 0.08, p.z);
+      m.scale.set(k, k, k);
+      m.material.opacity = 0.95 * (1 - a) * (1 - a);
+    }
     if (selected) {
       const p = cells.get(selected);
       const h = heightNow(selected, now);
@@ -625,7 +653,9 @@ export function createTable(host, opts = {}) {
     }
   }
 
-  // ---- 標籤（DOM）：選取的那一格＋今天漲跌最多的幾格
+  // ---- 標籤（DOM）：選取的那一格＋今天漲跌最多的幾格（上下留給 HUD：指數、倒數、漲跌家數）
+  const SAFE_T = 64;
+  const SAFE_B = 46;
   const labelEls = new Map();
   function labelList() {
     const arr = [...info.entries()].filter(([, s]) => s.pct != null).sort((a, b) => b[1].pct - a[1].pct);
@@ -665,9 +695,9 @@ export function createTable(host, opts = {}) {
       tmpV.set(p.x, heightNow(c, now) + top, p.z).project(camera);
       const x = (tmpV.x * 0.5 + 0.5) * w;
       const y = (-tmpV.y * 0.5 + 0.5) * h;
-      let hidden = tmpV.z > 1 || x < -40 || x > w + 40 || y < -20 || y > h + 20;
       const bw = 96;
       const bh = 44;
+      let hidden = tmpV.z > 1 || x < -40 || x > w + 40 || y - bh < SAFE_T || y > h - SAFE_B;
       const box = [x - bw / 2, y - bh, x + bw / 2, y];
       if (!hidden && boxes.some((b) => box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1])) hidden = true;
       if (!hidden) boxes.push(box);
@@ -694,7 +724,7 @@ export function createTable(host, opts = {}) {
       let box = [cx - 34, topY - 30, cx + 34, topY];
       let y = topY - 30;
       if (hit(box)) { box = [cx - 34, botY + 2, cx + 34, botY + 32]; y = botY + 2; }
-      const hide = tmpV.z > 1 || hit(box);
+      const hide = tmpV.z > 1 || hit(box) || box[1] < SAFE_T || box[3] > h - SAFE_B;
       if (!hide) boxes.push(box);
       e.style.transform = `translate(${cx.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, 0)`;
       e.style.opacity = hide ? '0' : '1';
@@ -818,7 +848,7 @@ export function createTable(host, opts = {}) {
       if (composer) composer.render(); else renderer.render(scene, camera);
       updateLabels(now);
     }
-    const needs = !reduced || animating || introT < 1 || ptrs.size;
+    const needs = !reduced || animating || introT < 1 || ptrs.size || pings.length;
     if (needs) raf = requestAnimationFrame(loop);
   }
   function resize() {
@@ -844,7 +874,7 @@ export function createTable(host, opts = {}) {
 
   return {
     ok: true,
-    setData, setHeld, setPending, setWatch, select,
+    setData, setHeld, setPending, setWatch, select, ping,
     ignite() { introT = reduced ? 1 : 0; kick(); },
     focus(c) {
       const p = cells.get(c);
@@ -935,7 +965,7 @@ function createFlat(host, wrap, opts) {
     setPending(l) { pend = new Set(l); draw(); },
     setWatch(l) { watch = new Set(l); draw(); },
     select(c) { sel = c; draw(); },
-    ignite() {}, focus() {}, reset() {},
+    ignite() {}, focus() {}, reset() {}, ping() {},
     dispose() { wrap.remove(); },
   };
 }
