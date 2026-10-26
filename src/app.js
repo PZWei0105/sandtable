@@ -324,6 +324,13 @@ function announce(quiet) {
 }
 
 // ------------------------------------------------------------------ 戰情列
+// 不在交易時段：資料是今天的就寫幾點的行情；不是今天的（休市日、颱風假、開盤前）寫那是哪一天的行情，
+// 不寫後台去問的時間（休市日後台照樣會去問，但拿到的是之前那天的價格）
+function feedLabel(qa, t) {
+  const qd = D.quotesDay();
+  if (qd && qd !== R.tw(t).d) return `行情 ${MD(qd)}（${WD(qd)}）`;
+  return `行情 ${HMS(qa).slice(0, 5)}`;
+}
 function tick() {
   const t = now();
   $('#clk').textContent = HMS(t);
@@ -341,7 +348,7 @@ function tick() {
   const feed = $('#feed');
   const trading = ['preopen', 'continuous', 'closing'].includes(ph.phase);
   feed.dataset.s = D.S.offline ? 'off' : !qa ? 'off' : trading && age > 12 ? 'stale' : 'ok';
-  $('#feedT').textContent = D.S.offline ? '離線' : !qa ? '' : trading ? (age < 1 ? '剛更新' : `${Math.floor(age)} 分前`) : `行情 ${HMS(qa).slice(0, 5)}`;
+  $('#feedT').textContent = D.S.offline ? '離線' : !qa ? '' : trading ? (age < 1 ? '剛更新' : `${Math.floor(age)} 分前`) : feedLabel(qa, t);
 }
 
 function renderAcct() {
@@ -1013,7 +1020,7 @@ function renderPos() {
       <div class="stats" style="margin-top:10px">
         <div><span>${termHTML('未實現損益')}</span><b class="${cls(unreal)}">${N(unreal)}</b></div>
         <div><span>已實現損益</span><b class="${cls(realized)}">${N(realized)}</b></div>
-        <div><span>已領配息</span><b class="up">${N(divs - Lg.pendingDiv)}</b></div>
+        <div><span>已領配息</span><b class="${cls(divs - Lg.pendingDiv)}">${N(divs - Lg.pendingDiv)}</b></div>
         <div><span>應收配息</span><b>${N(Lg.pendingDiv)}</b></div>
       </div>
       <p class="note">未實現損益已經扣掉「現在全部賣掉」要付的手續費與證交稅。</p>
@@ -1142,7 +1149,7 @@ async function renderReport() {
     <div class="dossier you"><div class="tab">${esc(r.name)} <small>開戰第 ${elapsed + 1} 天</small></div>
       <div class="hero"><div class="who">${MD(r.start.d)} ${HMS(r.start.at).slice(0, 5)} 開局 ・ 起始資金 ${N(r.capital)}</div>
         <div class="vs"><div><span>你</span><b class="${cls(rep.ret)}">${RET(rep.ret)}</b></div><div><span>同期間一直抱著 0050（含息）</span><b class="${cls(rep.bench)}">${RET(rep.bench)}</b></div></div>
-        <p class="note">${rep.excess == null ? '' : rep.excess >= 0 ? `目前贏 0050 <b class="up">${RET(rep.excess)}</b>。` : `目前輸 0050 <b class="down">${RET(rep.excess)}</b>：什麼都不做、只抱 0050，會比現在好。`}</p>
+        <p class="note">${rep.excess == null ? '' : Math.abs(rep.excess) < 5e-5 ? '目前和 0050 打平。' : rep.excess > 0 ? `目前贏 0050 <b class="up">${RET(rep.excess)}</b>。` : `目前輸 0050 <b class="down">${RET(rep.excess)}</b>：什麼都不做、只抱 0050，會比現在好。`}</p>
       </div>
       <div class="chart-wrap" style="height:210px"><canvas id="navCv"></canvas><div class="tip" id="navTip" hidden></div></div>
       ${days.length < 2 ? '<p class="note">開局第一天：之後每個交易日收盤會多一個點，曲線就出來了。</p>' : ''}
@@ -1476,6 +1483,12 @@ function openTicket(code, side) {
     const settleD = w && !w.blocked ? R.settleDay(D.S.cal, w.day, 2) : null;
     const b1 = q && q.b && q.b[0] ? q.b[0][0] : null;
     const a1 = q && q.a && q.a[0] ? q.a[0][0] : null;
+    // 委託是給之後那個交易日的（預約單、休市日）：那天的平盤、漲跌停要到那天才知道，
+    // 快捷鈕改用最近一次收盤估（漲停往下、跌停往上對齊升降單位；除息那天會不一樣，所以標「估」）
+    const est = w && !w.blocked && !k.c.sameDay && q && q.d && q.d < w.day && isNum(q.z);
+    const quick = est
+      ? [['跌停(估)', k.c.lim.none ? null : R.snapTick(q.z * 0.9, 1)], ['買一', b1], ['平盤(估)', q.z], ['賣一', a1], ['漲停(估)', k.c.lim.none ? null : R.snapTick(q.z * 1.1, -1)]]
+      : [['跌停', k.c.lim.down], ['買一', b1], ['平盤', ch.ref], ['成交', ch.px], ['賣一', a1], ['漲停', k.c.lim.up]];
     if (!full && sh.querySelector('#tCost')) {
       // 只更新會變的部分（行情、額度、錯誤）
       $('#tSess', sh).innerHTML = sessHTML(w);
@@ -1494,7 +1507,7 @@ function openTicket(code, side) {
       <div id="tSess">${sessHTML(w)}</div>
       <div class="field"><label>價格 ${st.type === 'M' ? '（市價：有人賣就買）' : st.type === 'C' ? '（盤後定價：今天收盤價）' : ''}</label>
         <div class="stepper"><button data-px="-1" ${st.type !== 'L' ? 'disabled' : ''}>−</button><input id="tPx" inputmode="decimal" value="${st.type === 'L' ? P(st.px) : st.type === 'C' ? P(st.px) : '市價'}" ${st.type !== 'L' ? 'disabled' : ''}><button data-px="1" ${st.type !== 'L' ? 'disabled' : ''}>＋</button></div>
-        ${st.type === 'L' ? `<div class="quick">${[['跌停', k.c.lim.down], ['買一', b1], ['平盤', ch.ref], ['成交', ch.px], ['賣一', a1], ['漲停', k.c.lim.up]].filter((x) => isNum(x[1])).map(([l, v]) => `<button data-setpx="${v}">${l} ${P(v)}</button>`).join('')}</div>` : ''}
+        ${st.type === 'L' ? `<div class="quick">${quick.filter((x) => isNum(x[1])).map(([l, v]) => `<button data-setpx="${v}">${l} ${P(v)}</button>`).join('')}</div>` : ''}
       </div>
       <div class="field"><label>數量（${st.kind === 'lot' ? '張' : '股'}）</label>
         <div class="stepper"><button data-q="-1">−</button><input id="tQty" inputmode="numeric" value="${qtyShown}"><button data-q="1">＋</button></div>
